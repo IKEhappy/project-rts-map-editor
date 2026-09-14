@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.gate/
+.gate-test/
+.smoke-data/
+.smoke-artifacts/
+*.log
+release/
+.gate-projects/
+.smoke-data2/
+.mimosa
