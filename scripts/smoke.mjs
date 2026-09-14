@@ -37,8 +37,12 @@ async function ev(client, expression) {
 async function waitForEval(client, expression, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const value = await ev(client, expression);
-    if (value) return value;
+    try {
+      const value = await ev(client, expression);
+      if (value) return value;
+    } catch {
+      /* 导航期间执行上下文销毁属预期，继续轮询 */
+    }
     if (Date.now() > deadline) throw new Error(`timeout waiting for: ${label}`);
     await sleep(250);
   }
@@ -54,6 +58,19 @@ const setInput = (client, testId, value) =>
   })()`);
 
 const click = (client, testId) => ev(client, `document.querySelector('[data-testid="${testId}"]').click()`);
+
+/** 真实鼠标点击（CDP Input 域，走完整命中测试——程序化 el.click() 绕过命中测试，
+ *  测不出 app-region 拖拽区吞点击这类 bug，2026-09-14 用户实测窗口按钮失灵的教训） */
+const realClick = async (client, testId) => {
+  const rect = await ev(
+    client,
+    `(() => { const r = document.querySelector('[data-testid="${testId}"]').getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`,
+  );
+  const { x, y } = JSON.parse(String(rect));
+  await client.Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+  await client.Input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await client.Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+};
 
 function killTree(child) {
   if (!child || child.exitCode !== null) return;
@@ -124,6 +141,18 @@ async function main() {
     await client.Runtime.enable();
     await client.Page.enable();
 
+    // dataDir 覆盖经 localStorage 跨实例持久化（用户特性），冒烟必须清掉上次的残留，
+    // 否则一启动就在读上次的外部目录（2026-09-14 踩坑：步骤间数据来源错乱）。
+    // 清掉后 reload，并等待新导航真正完成（旧页面与新页面的判定靠 navigation type）。
+    await ev(client, `localStorage.clear()`);
+    await ev(client, `location.reload()`);
+    await waitForEval(
+      client,
+      `document.readyState === "complete" && performance.getEntriesByType("navigation")[0]?.type === "reload"`,
+      20000,
+      "page reload complete",
+    );
+
     console.log("[smoke] 1. units 左侧实体列表 21 项 + 首实体选中");
     const itemCount = await waitForEval(
       client,
@@ -133,6 +162,13 @@ async function main() {
     );
     check("units 实体列表 21 项", itemCount === true);
     await click(client, "entity-item");
+    const workspaceBar = await ev(client, `!!document.querySelector('[data-testid="workspace-bar"]')`);
+    check("工作区选项卡行（第二行 panel）存在", workspaceBar === true);
+    const winButtons = await ev(
+      client,
+      `["win-min-btn", "win-max-btn", "win-close-btn"].every((id) => !!document.querySelector('[data-testid="' + id + '"]'))`,
+    );
+    check("无框窗口控制按钮齐全（最小化/最大化/关闭）", winButtons === true);
 
     const labelsOn = await ev(client, `document.body.textContent.includes("攻击间隔")`);
     check("字段中文标签已加载（攻击间隔）", labelsOn === true);
@@ -184,6 +220,28 @@ async function main() {
       "reloaded hp",
     );
     check("重载后 hp 输入框为 210", reloadedHp === true);
+
+    console.log("[smoke] 4.1 选项卡切换不弹窗不丢编辑（切建筑再切回，222 应保留）");
+    await setInput(client, "field-hp", "222");
+    await click(client, "tab-buildings");
+    await waitForEval(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === 18`,
+      20000,
+      "buildings loaded",
+    );
+    await click(client, "tab-units");
+    const retainedEdit = await waitForEval(
+      client,
+      `document.querySelector('[data-testid="field-hp"]')?.value === "222"`,
+      20000,
+      "retained 222",
+    );
+    check("切换选项卡后未保存编辑保留（222）", retainedEdit === true);
+    const tabDirtyMark = await ev(client, `!!document.querySelector('[data-testid="tab-units"] .tab-dirty')`);
+    check("选项卡上有未保存标记（黄点）", tabDirtyMark === true);
+    await setInput(client, "field-hp", "210");
+    await sleep(300);
 
     console.log("[smoke] 4.5 树形数组元素排序（auto_attack_targets 第 2 项上移一次）");
     const moveUp = (testId) =>
@@ -275,6 +333,20 @@ async function main() {
     check("重载后下拉选中 bomber", reloadedUnit === true);
 
     console.log("[smoke] 4.9 导入外部数据目录（.smoke-data2，预置 hp=222）");
+    await click(client, "tab-units");
+    let unitsBack = null;
+    for (let i = 0; i < 40 && unitsBack === null; i += 1) {
+      unitsBack = await ev(
+        client,
+        `document.querySelectorAll('[data-testid="entity-item"]').length === 21 ? true : JSON.stringify({ count: document.querySelectorAll('[data-testid="entity-item"]').length, tabUnits: document.querySelector('[data-testid="tab-units"]')?.className, banner: document.querySelector(".banner")?.textContent?.slice(0, 120), saveDisabled: document.querySelector('[data-testid="save-btn"]')?.disabled })`,
+      );
+      if (unitsBack === true) break;
+      await sleep(500);
+    }
+    if (unitsBack !== true) {
+      console.error(`  诊断：${String(unitsBack).slice(0, 300)}`);
+      throw new Error("timeout waiting for: units items back");
+    }
     const dataDir2 = path.join(root, ".smoke-data2");
     fs.rmSync(dataDir2, { recursive: true, force: true });
     fs.mkdirSync(dataDir2, { recursive: true });
@@ -304,6 +376,14 @@ async function main() {
       }
       await sleep(500);
     }
+    if (externalSaved === null) {
+      const banner = await ev(
+        client,
+        `(() => { const el = document.querySelector('[data-testid="save-errors"]') || document.querySelector('[data-testid="save-ok"]'); return el ? el.textContent : "(no banner)"; })()`,
+      );
+      const hpValue = await ev(client, `document.querySelector('[data-testid="field-hp"]')?.value`);
+      console.error(`  诊断：hp 输入框=${hpValue}，横幅=${String(banner).slice(0, 300)}`);
+    }
     check("外部目录经 gate 沙盒写盘 hp=333", externalSaved === 333);
     check("gate 沙盒工程已生成（.gate-projects/）", fs.existsSync(path.join(root, ".gate-projects")));
     await click(client, "dir-reset-btn");
@@ -314,6 +394,24 @@ async function main() {
       "default hp back",
     );
     check("恢复默认目录后 hp 回到 210", backHp === true);
+
+    console.log("[smoke] 4.95 无框窗口最大化/还原切换（真实鼠标点击，验证命中测试）");
+    await realClick(client, "win-max-btn");
+    const maximizedState = await waitForEval(
+      client,
+      `document.querySelector('[data-testid="win-max-btn"]')?.getAttribute("data-maximized") === "true"`,
+      10000,
+      "maximized state",
+    );
+    check("真实鼠标点击最大化生效", maximizedState === true);
+    await realClick(client, "win-max-btn");
+    const restoredState = await waitForEval(
+      client,
+      `document.querySelector('[data-testid="win-max-btn"]')?.getAttribute("data-maximized") === "false"`,
+      10000,
+      "restored state",
+    );
+    check("真实鼠标再次点击还原窗口", restoredState === true);
 
     console.log("[smoke] 5. 截图留档");
     const shot = await client.Page.captureScreenshot({ format: "png" });

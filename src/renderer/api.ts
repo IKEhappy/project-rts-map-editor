@@ -14,6 +14,9 @@ declare global {
         dataDir?: string | null;
       }): Promise<SaveResult>;
       pickFolder(): Promise<{ ok: boolean; path?: string }>;
+      windowCtl(action: "minimize" | "maximize" | "close" | "close-now"): Promise<{ ok: boolean }>;
+      onWindowState(callback: (maximized: boolean) => void): void;
+      onCloseRequest(callback: () => void): void;
     };
   }
 }

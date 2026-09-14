@@ -41,6 +41,9 @@ export default function EntityList(props: Props) {
         value={search}
         onChange={(e) => setSearch(e.target.value)}
       />
+      <div className="entity-count">
+        {filtered.length === props.rows.length ? `共 ${props.rows.length} 项` : `${filtered.length} / ${props.rows.length} 项`}
+      </div>
       <div className="entity-items">
         {filtered.map((row) => (
           <button

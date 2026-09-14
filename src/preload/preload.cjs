@@ -8,4 +8,11 @@ contextBridge.exposeInMainWorld('meApi', {
   read: (kind, dataDir) => ipcRenderer.invoke('config:read', kind, dataDir ?? null),
   save: (payload) => ipcRenderer.invoke('config:save', payload),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
+  windowCtl: (action) => ipcRenderer.invoke('window:ctl', action),
+  onWindowState: (callback) => {
+    ipcRenderer.on('window:maximized', (_event, value) => callback(value));
+  },
+  onCloseRequest: (callback) => {
+    ipcRenderer.on('window:close-requested', () => callback());
+  },
 });
