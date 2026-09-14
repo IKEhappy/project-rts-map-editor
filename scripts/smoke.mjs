@@ -29,7 +29,9 @@ function check(name, cond, detail = "") {
 async function ev(client, expression) {
   const r = await client.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) {
-    throw new Error(`eval exception: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+    const detail = r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "";
+    const at = String(detail).split("\n").slice(0, 4).join(" | ");
+    throw new Error(`eval exception: ${at} <<<EXPR>>> ${expression.slice(0, 160)}`);
   }
   return r.result.value;
 }
@@ -48,14 +50,26 @@ async function waitForEval(client, expression, timeoutMs, label) {
   }
 }
 
-const setInput = (client, testId, value) =>
-  ev(client, `(() => {
+const setInput = async (client, testId, value) => {
+  // 元素可能处于重载窗口（目录切换的清空/重载交错）——absent 时小退避重试
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const result = await ev(
+      client,
+      `(() => {
     const el = document.querySelector('[data-testid="${testId}"]');
+    if (!el || !(el instanceof window.HTMLInputElement)) return "absent";
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
     setter.call(el, "${String(value).replace(/\\/g, "\\\\")}");
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  })()`);
+    return "ok";
+  })()`,
+    );
+    if (result === "ok") return;
+    await sleep(300);
+  }
+  throw new Error(`setInput timeout: ${testId}`);
+};
 
 const click = (client, testId) => ev(client, `document.querySelector('[data-testid="${testId}"]').click()`);
 
@@ -265,7 +279,7 @@ async function main() {
     await click(client, "reload-btn");
     const firstTarget = await waitForEval(
       client,
-      `document.querySelector('[data-testid="field-auto_attack_targets-0"]')?.value === "turrets"`,
+      `document.querySelector('[data-testid="field-auto_attack_targets-0"]')?.getAttribute("data-value") === "turrets"`,
       20000,
       "reloaded first target",
     );
@@ -289,28 +303,28 @@ async function main() {
     await click(client, "entity-item");
     const unitTag = await waitForEval(
       client,
-      `(() => { const el = document.querySelector('[data-testid="field-lines-0-unit"]'); return el ? el.tagName : null; })()`,
+      `(() => { const el = document.querySelector('[data-testid="field-lines-0-unit"]'); return el ? el.tagName + ":" + (el.hasAttribute("data-value") ? "dd" : "raw") : null; })()`,
       10000,
-      "lines unit select",
+      "lines unit dropdown",
     );
-    check("lines.unit 为固定下拉 SELECT", unitTag === "SELECT", String(unitTag));
-    const optionCount = await ev(client, `document.querySelectorAll('[data-testid="field-lines-0-unit"] option').length`);
+    check("lines.unit 为自绘下拉（BUTTON+data-value）", unitTag === "BUTTON:dd", String(unitTag));
+    await click(client, "field-lines-0-unit"); // 打开菜单
+    const optionCount = await ev(client, `document.querySelectorAll('[data-testid^="field-lines-0-unit-opt-"]').length`);
     check("选项恰为 summon 组 5 项", optionCount === 5, `got ${optionCount}`);
-    const firstOption = await ev(client, `document.querySelector('[data-testid="field-lines-0-unit"] option')?.value`);
+    const firstOption = await ev(client, `document.querySelector('[data-testid^="field-lines-0-unit-opt-"]')?.getAttribute("data-value")`);
     check("首项为 transport", firstOption === "transport", String(firstOption));
-    const optionText = await ev(client, `document.querySelector('[data-testid="field-lines-0-unit"] option')?.text`);
+    const optionText = await ev(client, `document.querySelector('[data-testid^="field-lines-0-unit-opt-"]')?.textContent`);
     check("选项文本含中文名", typeof optionText === "string" && optionText.includes("（"), String(optionText));
     const hasVehicle = await ev(
       client,
-      `[...document.querySelectorAll('[data-testid="field-lines-0-unit"] option')].some((o) => o.value === "flamer")`,
+      `[...document.querySelectorAll('[data-testid^="field-lines-0-unit-opt-"]')].some((o) => o.getAttribute("data-value") === "flamer")`,
     );
     check("组外单位不可选（无 flamer）", hasVehicle === false);
+    await click(client, "field-lines-0-unit"); // 关闭菜单
 
     console.log("[smoke] 4.8 lines.unit 选择变更经 gate 写盘（fighter → bomber）");
-    await ev(
-      client,
-      `(() => { const el = document.querySelector('[data-testid="field-lines-0-unit"]'); const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set; setter.call(el, "bomber"); el.dispatchEvent(new Event("change", { bubbles: true })); })()`,
-    );
+    await click(client, "field-lines-0-unit");
+    await click(client, "field-lines-0-unit-opt-bomber");
     await click(client, "save-btn");
     let savedLineUnit = null;
     for (let waited = 0; waited < 45000; waited += 500) {
@@ -326,7 +340,7 @@ async function main() {
     await click(client, "reload-btn");
     const reloadedUnit = await waitForEval(
       client,
-      `document.querySelector('[data-testid="field-lines-0-unit"]')?.value === "bomber"`,
+      `document.querySelector('[data-testid="field-lines-0-unit"]')?.getAttribute("data-value") === "bomber"`,
       20000,
       "reloaded line unit",
     );
@@ -412,6 +426,70 @@ async function main() {
       "restored state",
     );
     check("真实鼠标再次点击还原窗口", restoredState === true);
+
+    console.log("[smoke] 4.96 从模板新建实体（字段序/key 可改/右键删除/保存过 gate）");
+    await click(client, "add-entity");
+    await click(client, "add-entity-opt-vehicle");
+    const createdCount = await waitForEval(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === 22`,
+      10000,
+      "22 items after create",
+    );
+    check("新实体出现在列表（22 项）", createdCount === true);
+    const firstFields = await ev(
+      client,
+      `JSON.stringify([...document.querySelectorAll('.field-row .field-label')].slice(0, 2).map((el) => el.textContent))`,
+    );
+    const fields = JSON.parse(String(firstFields));
+    check("新实体字段序首列为 id/key（与既有实体一致）", fields[0]?.startsWith("id") === true && fields[1]?.startsWith("key") === true, String(firstFields));
+    const keyEditable = await ev(client, `document.querySelector('[data-testid="field-key"]')?.tagName === "INPUT"`);
+    check("新实体 key 可编辑（INPUT）", keyEditable === true);
+    await ev(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]')[21].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 300, clientY: 400 }))`,
+    );
+    const menuVisible = await waitForEval(client, `!!document.querySelector('[data-testid="ctx-delete"]')`, 5000, "ctx menu");
+    check("右键菜单出现（删除该项）", menuVisible === true);
+    await click(client, "ctx-delete");
+    const backTo21 = await waitForEval(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === 21`,
+      5000,
+      "21 items after delete",
+    );
+    check("删除新实体回到 21 项", backTo21 === true);
+    const existingLocked = await ev(client, `document.querySelector('[data-testid="field-key"]')?.tagName === "SPAN"`);
+    check("既有实体 key 仍锁定（SPAN 只读）", existingLocked === true);
+    await click(client, "add-entity");
+    await click(client, "add-entity-opt-vehicle");
+    await waitForEval(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === 22`,
+      10000,
+      "22 items again",
+    );
+    const newHp = await ev(client, `document.querySelector('[data-testid="field-hp"]')?.value`);
+    check("新实体已选中且模板默认 hp=200", newHp === "200", String(newHp));
+    await click(client, "save-btn");
+    let savedCount = null;
+    for (let waited = 0; waited < 45000; waited += 500) {
+      const units = JSON.parse(fs.readFileSync(sandboxUnits, "utf8")).units;
+      if (units.length === 22 && units[21].key === "new_vehicle_1" && units[21].id === 21) {
+        savedCount = units.length;
+        break;
+      }
+      await sleep(500);
+    }
+    check("模板实体经 gate 写盘（id=21, key=new_vehicle_1）", savedCount === 22);
+    await click(client, "reload-btn");
+    const reloadedCount = await waitForEval(
+      client,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === 22`,
+      20000,
+      "22 after reload",
+    );
+    check("重载后仍 22 项", reloadedCount === true);
 
     console.log("[smoke] 5. 截图留档");
     const shot = await client.Page.captureScreenshot({ format: "png" });

@@ -428,6 +428,76 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--dirty);
 }
 
+.field-row.dragging {
+  opacity: 0.45;
+}
+
+.field-row.drop-target {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+/* 字段拖拽手柄（三横杠点阵）：悬停行时显现，按住拖动调整字段顺序 */
+.drag-grip {
+  flex-shrink: 0;
+  align-self: center;
+  width: 14px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #4a505a;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.field-row:hover .drag-grip {
+  opacity: 1;
+}
+
+.drag-grip:active {
+  cursor: grabbing;
+}
+
+/* 实体右键菜单（T-164 R10） */
+.ctx-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 140px;
+  padding: 4px;
+  background: #171a20;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ctx-option:hover {
+  background: var(--bg-hover);
+}
+
+.ctx-option.danger {
+  color: var(--err);
+}
+
+.ctx-option.danger:hover {
+  background: #3a1d1d;
+}
+
 .field-label {
   width: 300px;
   flex-shrink: 0;
@@ -647,6 +717,94 @@ button.mini.add:hover:not(:disabled) {
   background-repeat: no-repeat;
   background-position: right 8px center;
   cursor: pointer;
+}
+
+/* —— 自绘下拉（T-164 R9，替换原生 select 根治 Windows 弹层白闪） —— */
+.dropdown {
+  position: relative;
+  display: inline-flex;
+}
+
+.dd-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+  min-width: 90px;
+  max-width: 320px;
+  color: var(--text);
+}
+
+.dd-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dd-chevron {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.dd-menu {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  min-width: 100%;
+  max-width: 360px;
+  max-height: 260px;
+  overflow: auto;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: #171a20;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* 上弹（下方空间不足时自动切换，T-164 R10） */
+.dd-menu.up {
+  top: auto;
+  bottom: calc(100% + 3px);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.dd-chevron.up {
+  transform: rotate(180deg);
+}
+
+.dd-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--text);
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dd-option:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.dd-option.selected {
+  background: #1f3550;
+  color: #cfe4ff;
+}
+
+.dd-option:disabled {
+  color: var(--warn);
+  cursor: default;
 }
 
 .cell.arr {

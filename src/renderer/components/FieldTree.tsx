@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Entity, JsonValue } from "../types";
-import { enumOptions, type LabelsData } from "../labels";
+import { enumOptions, fieldLabel, type LabelsData } from "../labels";
+import Dropdown, { type DropdownOption } from "./Dropdown";
 import { FieldLabelView } from "./LabelBits";
 import type { UnitSuggestion } from "../suggest";
 
@@ -12,6 +13,8 @@ interface Props {
   labels: LabelsData;
   lightErrors: Map<string, string>;
   unitSuggestions: UnitSuggestion[];
+  /** 新实体（未存在于已保存文件）：key/id 可编辑（T-164 R10，保存后锁定） */
+  identityEditable?: boolean;
   onChange(next: Entity): void;
 }
 
@@ -79,8 +82,23 @@ function parentAt(root: Entity, path: Path): Record<string, JsonValue> | JsonVal
 
 /** 选中实体的字段树：标量行内编辑；标量数组逐元素增删/排序；对象数组（tiers/lines）嵌套展开。 */
 export default function FieldTree(props: Props) {
-  const { entity, original, labels, lightErrors, unitSuggestions, onChange } = props;
+  const { entity, original, labels, lightErrors, unitSuggestions, identityEditable, onChange } = props;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 顶层字段拖拽排序（T-164 R10：三横杠手柄拖动调整字段顺序，写回 JSON 键序）
+  const [dragField, setDragField] = useState<string | null>(null);
+  const [dropField, setDropField] = useState<string | null>(null);
+
+  const moveField = (from: string, to: string) => {
+    if (from === to) return;
+    const keys = Object.keys(entity);
+    const fromIndex = keys.indexOf(from);
+    const toIndex = keys.indexOf(to);
+    if (fromIndex < 0 || toIndex < 0) return;
+    keys.splice(toIndex, 0, keys.splice(fromIndex, 1)[0]);
+    const next: Entity = {};
+    for (const key of keys) next[key] = entity[key];
+    onChange(next);
+  };
 
   const update = (path: Path, value: JsonValue) => {
     const next = deepClone(entity);
@@ -156,41 +174,34 @@ export default function FieldTree(props: Props) {
     if (typeof value === "string") {
       const error = lightErrors.get(pathKey(path));
       // lines[].unit：固定下拉（T-164 R2.2 用户改裁定）——只能选本建筑 role 组内单位，
-      // 组外现存值保留为带警示的兜底选项（数据不静默丢失），不在选项内即不可选
+      // 组外现存值保留为带警示的兜底选项（数据不静默丢失），不在选项内即不可选。
+      // R9：原生 select 换自绘 Dropdown（根治 Windows 弹层先白后黑闪烁）
       if (field === "unit" && path[0] === "lines" && unitSuggestions.length > 0) {
-        const inGroup = unitSuggestions.some((suggestion) => suggestion.key === value);
+        const options: DropdownOption[] = unitSuggestions.map((suggestion) => ({
+          value: suggestion.key,
+          label: suggestion.label,
+        }));
         return (
-          <select
-            className="cell select"
-            data-testid={testId}
-            data-error={error}
+          <Dropdown
             value={value}
+            options={options}
+            onChange={(next) => update(path, next)}
+            testId={testId}
             title={error}
-            onChange={(e) => update(path, e.target.value)}
-          >
-            {unitSuggestions.map((suggestion) => (
-              <option key={suggestion.key} value={suggestion.key}>
-                {suggestion.label}
-              </option>
-            ))}
-            {!inGroup ? <option value={value}>{value}（不在本建筑 role 组）</option> : null}
-          </select>
+          />
         );
       }
       const options = enumOptions(labels, field);
       if (options) {
-        const known = options.some(([v]) => v === value);
         return (
-          <select className="cell select" data-testid={testId} value={value} onChange={(e) => update(path, e.target.value)}>
-            {options.map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-            {!known ? (
-              <option value={value}>{value}</option>
-            ) : null}
-          </select>
+          <Dropdown
+            value={value}
+            options={options.map(([v, label]) => ({ value: v, label }))}
+            onChange={(next) => update(path, next)}
+            testId={testId}
+            invalid={Boolean(error)}
+            title={error ?? undefined}
+          />
         );
       }
       return (
@@ -287,12 +298,34 @@ export default function FieldTree(props: Props) {
     originalValue: JsonValue | undefined,
     path: Path,
     identity: boolean,
+    topLevel = false,
   ): React.ReactNode => {
     const dirty = JSON.stringify(value) !== JSON.stringify(originalValue);
     const testId = `field-${pathKey(path)}`;
     let editor: React.ReactNode;
     if (identity) {
-      editor = <span className="identity">{String(value)}</span>;
+      if (identityEditable && field === "key" && typeof value === "string") {
+        editor = (
+          <input
+            className="cell str"
+            data-testid={testId}
+            type="text"
+            value={value}
+            title="新实体可修改 key（保存后锁定）"
+            onChange={(e) => update(path, e.target.value)}
+          />
+        );
+      } else if (identityEditable && field === "id" && typeof value === "number") {
+        editor = (
+          <NumberInput value={value} testId={testId} onCommit={(next) => update(path, next)} />
+        );
+      } else {
+        editor = (
+          <span className="identity" data-testid={testId} title="身份字段，已保存实体不可改">
+            {String(value)}
+          </span>
+        );
+      }
     } else if (Array.isArray(value)) {
       editor = renderArray(field, value, Array.isArray(originalValue) ? originalValue : undefined, path);
     } else if (value !== null && typeof value === "object") {
@@ -312,7 +345,42 @@ export default function FieldTree(props: Props) {
       editor = renderScalar(field, value, path, testId);
     }
     return (
-      <div className={`field-row${dirty ? " dirty" : ""}`} key={field}>
+      <div
+        className={`field-row${dirty ? " dirty" : ""}${topLevel && dragField === field ? " dragging" : ""}${topLevel && dropField === field ? " drop-target" : ""}`}
+        key={field}
+        onDragOver={
+          topLevel && dragField !== null && dragField !== field
+            ? (event) => {
+                event.preventDefault();
+                setDropField(field);
+              }
+            : undefined
+        }
+        onDragLeave={topLevel ? () => setDropField((prev) => (prev === field ? null : prev)) : undefined}
+        onDrop={
+          topLevel
+            ? (event) => {
+                event.preventDefault();
+                if (dragField !== null) moveField(dragField, field);
+                setDragField(null);
+                setDropField(null);
+              }
+            : undefined
+        }
+        onDragEnd={topLevel ? () => { setDragField(null); setDropField(null); } : undefined}
+      >
+        {topLevel ? (
+          <span className="drag-grip" title="拖动调整字段顺序" draggable onDragStart={() => setDragField(field)}>
+            <svg width="8" height="12" viewBox="0 0 8 12" aria-hidden="true">
+              <circle cx="2" cy="2" r="1" fill="currentColor" />
+              <circle cx="6" cy="2" r="1" fill="currentColor" />
+              <circle cx="2" cy="6" r="1" fill="currentColor" />
+              <circle cx="6" cy="6" r="1" fill="currentColor" />
+              <circle cx="2" cy="10" r="1" fill="currentColor" />
+              <circle cx="6" cy="10" r="1" fill="currentColor" />
+            </svg>
+          </span>
+        ) : null}
         <div className="field-label" title={field}>
           <FieldLabelView field={field} labels={labels} />
         </div>
@@ -324,7 +392,7 @@ export default function FieldTree(props: Props) {
   return (
     <div className="field-tree">
       {Object.entries(entity).map(([field, value]) =>
-        renderFieldRow(field, value, (original as Record<string, JsonValue>)[field], [field], IDENTITY_FIELDS.has(field)),
+        renderFieldRow(field, value, (original as Record<string, JsonValue>)[field], [field], IDENTITY_FIELDS.has(field), true),
       )}
     </div>
   );

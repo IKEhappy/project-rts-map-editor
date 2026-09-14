@@ -54,11 +54,11 @@
   },
   "values": {
     "role": {
-      "hq": "总部",
+      "hq": "飞碟-总部",
       "none": "无",
-      "summon": "召唤物",
-      "super": "超重型",
-      "vehicle": "战车"
+      "summon": "召唤物-雷达",
+      "super": "超级-超级工厂",
+      "vehicle": "战车-坦克工厂"
     },
     "attack_fx": {
       "line": "直线高速",

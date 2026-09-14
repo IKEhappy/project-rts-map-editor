@@ -179,26 +179,44 @@ function gateProjectFor(dataDir) {
   const e = env();
   const dir = resolveDataDir(dataDir);
   if (samePath(dir, e.dataDir)) return e.godotProject;
-  const sandbox = path.join(GATE_PROJECTS_DIR, dirSlug(dir));
+  // 目录名含 src 标记哈希：src 变化即换新沙盒目录，绝不删除活动/刚用过的沙盒——
+  // Windows 下删刚写过的树会撞杀毒扫描锁（ENOTEMPTY/EPERM，实测重试也扛不过分钟级窗口）；
+  // 旧版本目录在新沙盒建好后惰性清扫，锁着就留到下一轮。
   const srcSource = path.join(e.godotProject, 'src');
-  const markerFile = path.join(sandbox, '.src-marker');
-  const cacheFile = path.join(sandbox, '.godot', 'global_script_class_cache.cfg');
   const marker = treeMarker(srcSource);
-  const stale =
-    !fs.existsSync(cacheFile) || !fs.existsSync(markerFile) || fs.readFileSync(markerFile, 'utf8') !== marker;
-  if (stale) {
-    fs.rmSync(sandbox, { recursive: true, force: true });
+  const markerHash = crypto.createHash('sha1').update(marker).digest('hex').slice(0, 8);
+  const sandbox = path.join(GATE_PROJECTS_DIR, `${dirSlug(dir)}-${markerHash}`);
+  const cacheFile = path.join(sandbox, '.godot', 'global_script_class_cache.cfg');
+  if (!fs.existsSync(cacheFile)) {
     fs.mkdirSync(path.join(sandbox, 'data'), { recursive: true });
     fs.writeFileSync(path.join(sandbox, 'project.godot'), MINIMAL_PROJECT_GODOT);
     fs.cpSync(srcSource, path.join(sandbox, 'src'), { recursive: true });
-    fs.writeFileSync(markerFile, marker);
     const exe = fs.existsSync(e.godotExe) ? e.godotExe : 'godot';
     spawnSync(exe, ['--headless', '--path', sandbox, '--import'], { encoding: 'utf8', timeout: 300000 });
+    sweepStaleSandboxes(dirSlug(dir), sandbox);
   }
   for (const name of DATA_FILES) {
     fs.copyFileSync(path.join(dir, name), path.join(sandbox, 'data', name));
   }
   return sandbox;
+}
+
+// 同一数据目录的旧版本沙盒：尽力删除，失败（被扫描锁）留到下次
+function sweepStaleSandboxes(slug, keepPath) {
+  try {
+    for (const entry of fs.readdirSync(GATE_PROJECTS_DIR)) {
+      if (!entry.startsWith(`${slug}-`)) continue;
+      const full = path.join(GATE_PROJECTS_DIR, entry);
+      if (samePath(full, keepPath)) continue;
+      try {
+        fs.rmSync(full, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      } catch {
+        /* 被锁，留待下轮 */
+      }
+    }
+  } catch {
+    /* 目录不存在等，忽略 */
+  }
 }
 
 // gate 协议见 gate/config_gate.gd 头注释：stdout 单行 GATE_RESULT {json}，exit 0/2/3。

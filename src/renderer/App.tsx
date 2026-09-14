@@ -7,6 +7,7 @@ import RulesTable from "./components/RulesTable";
 import type { LabelsData } from "./labels";
 import { validateEntityTree, validateRuleValue } from "./light-validation";
 import { knownUnitKeys, summonLinesHint, unitSuggestionsFor } from "./suggest";
+import { instantiateTemplate, templatesOf, type TemplateDef } from "./templates";
 import type { ConfigFile, Entity, JsonValue, Kind, MetaResult, ReadResult, SaveResult } from "./types";
 
 const ALL_KINDS: Kind[] = ["units", "buildings", "rules"];
@@ -196,6 +197,12 @@ export default function App() {
     return Object.entries(load.doc).filter(([key]) => key !== "version" && key !== "_note") as Array<[string, JsonValue]>;
   }, [load, activeKind]);
 
+  // 模板库（T-164 R9）：当前类别的 "templates" 数组 → 新建下拉
+  const templates: TemplateDef[] = useMemo(
+    () => (load && activeKind !== "rules" ? templatesOf(load.doc) : []),
+    [load, activeKind],
+  );
+
   const originalRules = useMemo(() => {
     if (!load || activeKind !== "rules") return {} as Record<string, JsonValue>;
     return JSON.parse(load.text) as Record<string, JsonValue>;
@@ -212,21 +219,66 @@ export default function App() {
     [activeKind],
   );
 
+  /** 实体变更：以"当前选中实体"为锚替换（新实体改 key 后仍能命中），改名则跟随选中 */
   const onEntityChange = useCallback(
     (next: Entity) => {
+      const anchorKey = selected ? String(selected.key) : null;
+      if (anchorKey === null) return;
       updateActiveDoc((state) => {
         const nextRows = (Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : []).map((row) =>
-          String(row.key) === String(next.key) ? next : row,
+          String(row.key) === anchorKey ? next : row,
         );
         return { ...state, doc: { ...state.doc, [state.kind]: nextRows } };
       });
+      if (String(next.key) !== anchorKey) {
+        setSelectedKeys((keys) => ({ ...keys, [activeKind]: String(next.key) }));
+      }
     },
-    [updateActiveDoc],
+    [selected, activeKind, updateActiveDoc],
+  );
+
+  /** 新实体判定：key 不在已保存原文中（改名/删除的放行依据；既有实体删除仍禁） */
+  const isNewEntity = useCallback(
+    (key: string) => !originalRows.some((row) => String(row.key) === key),
+    [originalRows],
+  );
+
+  const deleteEntity = useCallback(
+    (key: string) => {
+      if (!isNewEntity(key)) {
+        setSaveState({
+          tone: "rejected",
+          code: "usage",
+          errors: [`既有实体（${key}）删除仍被禁止：其他配置可能引用它，引用完整性无法校验；如确需删除请直接编辑数据文件`],
+        });
+        return;
+      }
+      updateActiveDoc((state) => {
+        const rowsNow = Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : [];
+        return { ...state, doc: { ...state.doc, [state.kind]: rowsNow.filter((row) => String(row.key) !== key) } };
+      });
+      if (selectedKeys[activeKind] === key) {
+        setSelectedKeys((keys) => ({ ...keys, [activeKind]: "" }));
+      }
+    },
+    [isNewEntity, updateActiveDoc, selectedKeys, activeKind],
   );
 
   const onRuleChange = useCallback(
     (key: string, value: JsonValue) => {
       updateActiveDoc((state) => ({ ...state, doc: { ...state.doc, [key]: value } }));
+    },
+    [updateActiveDoc],
+  );
+
+  const createFromTemplate = useCallback(
+    (tpl: TemplateDef) => {
+      updateActiveDoc((state) => {
+        const rowsNow = Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : [];
+        const entity = instantiateTemplate(tpl, rowsNow);
+        setSelectedKeys((keys) => ({ ...keys, [state.kind]: String(entity.key) }));
+        return { ...state, doc: { ...state.doc, [state.kind]: [...rowsNow, entity] } };
+      });
     },
     [updateActiveDoc],
   );
@@ -297,25 +349,35 @@ export default function App() {
     loadKind(kind);
   };
 
-  /** 切换数据目录：先探测可读，若有任一表未保存则确认丢弃，随后整组工作副本重置 */
+  /** 切换数据目录：先探测可读，若有任一表未保存则确认丢弃，随后整组工作副本重置。
+   *  幂等守卫：同目录切换在途时直接跳过（Enter + 按钮双触发会产生并发，清空/重载交错
+   *  出现短暂无内容窗口，2026-09-14 冒烟实测抓到） */
+  const applyingDirRef = useRef<string | null>(null);
   const applyDataDir = useCallback(
     async (dir: string | null) => {
-      if (dir !== null) {
-        const probe: ReadResult = await api.read("units", dir);
-        if (!probe.ok) {
-          setSaveState({
-            tone: "rejected",
-            code: "usage",
-            errors: [probe.error ?? "目录不可用（须同时含 units/buildings/rules.json）"],
-          });
-          return;
+      const token = dir ?? "__default__";
+      if (applyingDirRef.current === token) return;
+      applyingDirRef.current = token;
+      try {
+        if (dir !== null) {
+          const probe: ReadResult = await api.read("units", dir);
+          if (!probe.ok) {
+            setSaveState({
+              tone: "rejected",
+              code: "usage",
+              errors: [probe.error ?? "目录不可用（须同时含 units/buildings/rules.json）"],
+            });
+            return;
+          }
         }
+        if (anyDirty && !window.confirm("有未保存修改，切换数据目录将丢弃全部，确认？")) return;
+        setDataDirOverride(dir);
+        setSelectedKeys({ units: "", buildings: "" });
+        setDocs({});
+        loadKind(activeKind, dir, true);
+      } finally {
+        applyingDirRef.current = null;
       }
-      if (anyDirty && !window.confirm("有未保存修改，切换数据目录将丢弃全部，确认？")) return;
-      setDataDirOverride(dir);
-      setSelectedKeys({ units: "", buildings: "" });
-      setDocs({});
-      loadKind(activeKind, dir, true);
     },
     [anyDirty, activeKind, loadKind],
   );
@@ -510,6 +572,9 @@ export default function App() {
               rows={rows}
               selectedKey={String(selected?.key ?? "")}
               onSelect={(key) => setSelectedKeys((keys) => ({ ...keys, [activeKind]: key }))}
+              templates={templates}
+              onCreateFromTemplate={createFromTemplate}
+              onDelete={deleteEntity}
             />
             <section className="detail">
               {summonHint ? <div className="banner warn compact">{summonHint}</div> : null}
@@ -520,10 +585,11 @@ export default function App() {
                   labels={labelsData}
                   lightErrors={lightErrors}
                   unitSuggestions={unitSuggestions}
+                  identityEditable={isNewEntity(String(selected.key))}
                   onChange={onEntityChange}
                 />
               ) : (
-                <div className="empty">（空表——R1 不支持增删实体）</div>
+                <div className="empty">（空表——可从左下「＋ 从模板新建」创建实体；删除仍不支持）</div>
               )}
             </section>
           </div>

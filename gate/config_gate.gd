@@ -85,7 +85,9 @@ func _check(options: Dictionary) -> Dictionary:
 		return _rejected(kind, extraction["errors"])
 
 	var errors: Array = []
-	for error: String in _mc().validate(extraction["override"], defaults):
+	var check_base: Dictionary = defaults.duplicate(true)
+	check_base[kind] = extraction.get("base", defaults.get(kind, {}))
+	for error: String in _mc().validate(extraction["override"], check_base):
 		errors.append(error)
 	return {"ok": errors.is_empty(), "mode": "check", "kind": kind, "errors": errors}
 
@@ -154,13 +156,17 @@ func _extract_override(kind: String, candidate: Dictionary, defaults: Dictionary
 				seen_ids[int(id_variant)] = true
 		by_key[key] = row
 	var base: Dictionary = defaults.get(kind, {})
+	# R9（2026-09-14 用户需求：模板新建实体）：新增实体放行，并入扩展 base 后走
+	# MatchConfig.validate 全量深检（identity/未知字段/数值域/tiers/lines 照常）；
+	# 删除实体仍禁止（引用完整性无手段校验）。
+	var extended_base: Dictionary = base.duplicate(true)
 	for key: String in by_key:
 		if not base.has(key):
-			errors.append("R1 禁止新增实体：%s.%s（实体增删须专项，见 T-164）" % [kind, key])
+			extended_base[key] = by_key[key]
 	for key: String in base:
 		if not by_key.has(key):
-			errors.append("R1 禁止删除实体：%s.%s（实体增删须专项，见 T-164）" % [kind, key])
-	return {"override": {kind: by_key}, "errors": errors}
+			errors.append("禁止删除实体：%s.%s（引用完整性无法校验）" % [kind, key])
+	return {"override": {kind: by_key}, "base": extended_base, "errors": errors}
 
 
 func _mc() -> GDScript:
