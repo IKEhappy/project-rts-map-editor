@@ -1,5 +1,14 @@
 import type { LabelsReadResult } from "./labels";
-import type { ConfigFile, Kind, MetaResult, ReadResult, SaveResult } from "./types";
+import type {
+  ConfigFile,
+  Kind,
+  MapReadResult,
+  MapSaveResult,
+  MapsListResult,
+  MetaResult,
+  ReadResult,
+  SaveResult,
+} from "./types";
 
 declare global {
   interface Window {
@@ -13,6 +22,18 @@ declare global {
         baseHash: string;
         dataDir?: string | null;
       }): Promise<SaveResult>;
+      listMaps(): Promise<MapsListResult>;
+      readMap(name: string): Promise<MapReadResult>;
+      saveMap(payload: {
+        name: string;
+        data: ConfigFile;
+        baseHash: string;
+        expectCreate?: boolean;
+      }): Promise<MapSaveResult>;
+      renameMap(payload: { from: string; to: string }): Promise<MapSaveResult>;
+      openMapFile(name: string): Promise<{ ok: boolean; error?: string }>;
+      openMapFolder(name: string): Promise<{ ok: boolean; error?: string }>;
+      readIcon(name: string): Promise<{ ok: boolean; text?: string; error?: string }>;
       pickFolder(): Promise<{ ok: boolean; path?: string }>;
       windowCtl(action: "minimize" | "maximize" | "close" | "close-now"): Promise<{ ok: boolean }>;
       onWindowState(callback: (maximized: boolean) => void): void;

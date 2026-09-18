@@ -25,10 +25,45 @@ export interface SaveResult {
   code?: string;
 }
 
+// —— 地图编辑（T-164 R7）：dev-2d data/maps/*.json 多文件 ——
+
+export interface MapFileMeta {
+  name: string;
+  path: string;
+  mtimeMs: number;
+}
+
+export interface MapsListResult {
+  ok: boolean;
+  maps?: MapFileMeta[];
+  mapsDir?: string;
+  error?: string;
+}
+
+export interface MapReadResult {
+  ok: boolean;
+  kind?: "maps";
+  name?: string;
+  data?: ConfigFile;
+  text?: string;
+  hash?: string;
+  path?: string;
+  mtimeMs?: number;
+  error?: string;
+}
+
+export interface MapSaveResult extends SaveResult {
+  name?: string;
+  path?: string;
+}
+
 export interface MetaResult {
   dataDir: string;
   godotExe: string;
   godotProject: string;
   gateScript: string;
   files: Record<string, string>;
+  mapsDir: string;
+  mapProject: string;
+  mapGateScript: string;
 }

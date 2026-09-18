@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "_note": "走廊图：两道纵向墙夹出中央走廊，两端出生；走廊中段中立矿井；四角各一座电厂。",
+  "name": "p0_corridor",
+  "renderer": "res://data/render/default.json",
+  "ground": { "default_material": "grass" },
+  "width": 16,
+  "height": 16,
+  "default_terrain": 0,
+  "terrain_patches": [
+	{
+	  "x": 5,
+	  "y": 2,
+	  "w": 1,
+	  "h": 12,
+	  "terrain": 1
+	},
+	{
+	  "x": 10,
+	  "y": 2,
+	  "w": 1,
+	  "h": 12,
+	  "terrain": 1
+	}
+  ],
+  "config": {
+	"turrets": ["turret_guard", "turret_aa", "turret_ion", "turret_storm", "turret_cluster"]
+  },
+  "buildings": [
+	{
+	  "key": "mine",
+	  "x": 7,
+	  "y": 6,
+	  "w": 2,
+	  "h": 3,
+	  "team": 0
+	},
+	{
+	  "key": "research_establishment",
+	  "x": 0,
+	  "y": 0,
+	  "w": 2,
+	  "h": 2,
+	  "team": 0
+	},
+	{
+	  "key": "research_establishment",
+	  "x": 13,
+	  "y": 0,
+	  "w": 2,
+	  "h": 2,
+	  "team": 0
+	},
+	{
+	  "key": "research_establishment",
+	  "x": 0,
+	  "y": 13,
+	  "w": 2,
+	  "h": 2,
+	  "team": 0
+	},
+	{
+	  "key": "research_establishment",
+	  "x": 13,
+	  "y": 13,
+	  "w": 2,
+	  "h": 2,
+	  "team": 0
+	}
+  ],
+  "spawns": [
+	{
+	  "team": 1,
+	  "x": 8,
+	  "y": 0
+	},
+	{
+	  "team": 2,
+	  "x": 8,
+	  "y": 15
+	}
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "_note": "A/B Case 基板",
+  "name": "box-overwrite",
+  "width": 16,
+  "height": 12,
+  "default_terrain": 0,
+  "seed": 1,
+  "renderer": "res://data/render/default.json",
+  "ground": {
+    "default_material": "grass"
+  },
+  "box_mode": [
+    {
+      "start": {
+        "w": 2,
+        "h": 2
+      },
+      "end": {
+        "w": 6,
+        "h": 2
+      },
+      "access": 3,
+      "build": 1
+    },
+    {
+      "start": {
+        "w": 2,
+        "h": 3
+      },
+      "end": {
+        "w": 3,
+        "h": 4
+      },
+      "access": 3,
+      "build": 1
+    },
+    {
+      "start": {
+        "w": 4,
+        "h": 3
+      },
+      "end": {
+        "w": 8,
+        "h": 5
+      },
+      "access": 1,
+      "build": 1
+    }
+  ],
+  "terrain_patches": [],
+  "buildings": [],
+  "spawns": [],
+  "decor": [],
+  "init": {}
+}

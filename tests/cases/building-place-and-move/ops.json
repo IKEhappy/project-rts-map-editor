@@ -1,0 +1,33 @@
+[
+  {
+    "tool": "building"
+  },
+  {
+    "select": "map-select-building",
+    "value": "hq"
+  },
+  {
+    "clickCell": [
+      2,
+      2
+    ]
+  },
+  {
+    "tool": "move-unit"
+  },
+  {
+    "dragCell": [
+      [
+        3,
+        3
+      ],
+      [
+        8,
+        7
+      ]
+    ]
+  },
+  {
+    "save": true
+  }
+]

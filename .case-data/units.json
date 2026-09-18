@@ -1,0 +1,642 @@
+{
+  "version": 2,
+  "_note": "单位表 v2（2026-09-06 第五批，口径见 docs/单位建筑图鉴.md）。tier=战车规格档(0轻/1中/2重，血量x(1+0.5t)伤害x(1+0.4t))；attack_period 单位级攻击间隔；flags: air/anti_air/aa_immune(防空打不到)/friendly_fire(溅射伤己)/random_target(随机锁定)/suicide(自爆)。attack_fx=弹种视觉（2026-09-10 用户裁定：line/laser/beam/missile/flame/flak，缺省 line，纯表现不影响结算，见 docs/攻击效果分化方案.md）；suicide 单位须配 blast_radii_cells（罗根五段递增同心圆，每段只伤新增圆环）与 blast_interval_ticks。auto_attack_targets=自动攻击方式（2026-09-10 用户裁定）：参与自动开火的目标类与优先级顺序，取 units/turrets/buildings 子集、数组序即优先序，缺省 [units,turrets,buildings]，行军中照常自动开火；地图/战役 config.units.<key> 同字段覆盖。",
+  "units": [
+    {
+      "id": 0,
+      "key": "cougar",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "美洲狮",
+      "role": "super",
+      "hp": 200,
+      "speed": 5,
+      "range": 3,
+      "damage": 20,
+      "armor": 1,
+      "attack_period": 5,
+      "flags": [],
+      "attack_fx": "line"
+    },
+    {
+      "id": 1,
+      "key": "kodiak",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "科迪亚克",
+      "role": "super",
+      "hp": 640,
+      "speed": 2,
+      "range": 1,
+      "damage": 45,
+      "armor": 4,
+      "attack_period": 20,
+      "attack_fx": "laser",
+      "flags": []
+    },
+    {
+      "id": 2,
+      "key": "gatling",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "格林机关炮",
+      "role": "super",
+      "hp": 140,
+      "speed": 3,
+      "range": 7,
+      "damage": 9,
+      "armor": 0,
+      "attack_period": 20,
+      "attack_fx": "line",
+      "flags": []
+    },
+    {
+      "id": 3,
+      "key": "achilles",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "阿基里斯",
+      "role": "super",
+      "hp": 150,
+      "speed": 4,
+      "range": 2,
+      "damage": 15,
+      "armor": 1,
+      "attack_period": 5,
+      "flags": [],
+      "attack_fx": "line"
+    },
+    {
+      "id": 4,
+      "key": "advancer",
+      "auto_attack_targets": [
+        "units"
+      ],
+      "respawn_seconds": 0,
+      "name_cn": "飞碟",
+      "role": "hq",
+      "hp": 60,
+      "speed": 5,
+      "range": 2,
+      "damage": 30,
+      "armor": 0,
+      "attack_period": 5,
+      "attack_fx": "beam",
+      "flags": [
+        "air"
+      ],
+      "laser": {
+        "targets": [
+          12
+        ],
+        "range": 6,
+        "period": 45,
+        "damage": 25
+      }
+    },
+    {
+      "id": 5,
+      "key": "logan",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "罗根炸弹",
+      "role": "super",
+      "hp": 400,
+      "speed": 6,
+      "range": 1,
+      "damage": 500,
+      "armor": 0,
+      "attack_period": 20,
+      "blast_radii_cells": [
+        2,
+        4,
+        6,
+        8,
+        10
+      ],
+      "blast_interval_ticks": 10,
+      "flags": [
+        "suicide",
+        "friendly_fire"
+      ],
+      "attack_fx": "line"
+    },
+    {
+      "id": 6,
+      "key": "flamer",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "喷火坦克",
+      "role": "vehicle",
+      "hp": 200,
+      "speed": 3,
+      "range": 2,
+      "damage": 7,
+      "armor": 1,
+      "attack_period": 20,
+      "attack_fx": "flame",
+      "flags": [
+        "splash",
+        "tiered"
+      ],
+      "tiers": [
+        {
+          "name_cn": "轻型喷火坦克",
+          "hp": 200,
+          "damage": 7,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 2,
+          "size_scale": 1.0
+        },
+        {
+          "name_cn": "中型喷火坦克",
+          "hp": 300,
+          "damage": 9,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 2,
+          "size_scale": 1.25
+        },
+        {
+          "name_cn": "重型喷火坦克",
+          "hp": 400,
+          "damage": 12,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 2,
+          "size_scale": 1.5
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "key": "armor_tank",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "装甲坦克",
+      "role": "vehicle",
+      "hp": 260,
+      "speed": 2,
+      "range": 4,
+      "damage": 16,
+      "armor": 3,
+      "attack_period": 20,
+      "attack_fx": "line",
+      "flags": [
+        "tiered"
+      ],
+      "tiers": [
+        {
+          "name_cn": "轻型装甲坦克",
+          "hp": 260,
+          "damage": 16,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 4,
+          "size_scale": 1.0
+        },
+        {
+          "name_cn": "中型装甲坦克",
+          "hp": 390,
+          "damage": 22,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 4,
+          "size_scale": 1.25
+        },
+        {
+          "name_cn": "重型装甲坦克",
+          "hp": 520,
+          "damage": 28,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 4,
+          "size_scale": 1.5
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "key": "transport",
+      "auto_attack_targets": [],
+      "name_cn": "运兵飞船",
+      "role": "summon",
+      "hp": 200,
+      "speed": 5,
+      "range": 2,
+      "damage": 4,
+      "armor": 0,
+      "attack_period": 20,
+      "flags": [
+        "air",
+        "strike"
+      ],
+      "attack_fx": "line",
+      "transport": {
+        "dwell_ticks": 60,
+        "templates": [
+          {
+            "weight": 1,
+            "slots": {}
+          },
+          {
+            "weight": 4,
+            "slots": {
+              "1": "cougar",
+              "2": "cougar",
+              "5": "gatling",
+              "6": "gatling"
+            }
+          },
+          {
+            "weight": 2,
+            "slots": {
+              "1": "kodiak",
+              "2": "armor_tank",
+              "3": "cougar",
+              "4": "cougar",
+              "5": "flak_tank",
+              "6": "envoy_tank",
+              "7": "gatling",
+              "8": "achilles"
+            }
+          }
+        ],
+        "accel_ticks": 20
+      }
+    },
+    {
+      "id": 9,
+      "key": "bomber",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "重型轰炸机",
+      "role": "summon",
+      "hp": 160,
+      "speed": 3,
+      "range": 2,
+      "damage": 0,
+      "armor": 0,
+      "attack_period": 40,
+      "flags": [
+        "air",
+        "splash",
+        "strike"
+      ],
+      "attack_fx": "line",
+      "strike": {
+        "line_cells": 7,
+        "bombs_per_cell": 1,
+        "fall_ticks": 15,
+        "bomb_radius": 1
+      }
+    },
+    {
+      "id": 10,
+      "key": "flak_tank",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "高射炮坦克",
+      "role": "vehicle",
+      "hp": 160,
+      "speed": 3,
+      "range": 5,
+      "damage": 10,
+      "armor": 1,
+      "attack_period": 20,
+      "attack_fx": "flak",
+      "flags": [
+        "anti_air",
+        "tiered"
+      ],
+      "tiers": [
+        {
+          "name_cn": "轻型高射炮坦克",
+          "hp": 160,
+          "damage": 10,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 5,
+          "size_scale": 1.0
+        },
+        {
+          "name_cn": "中型高射炮坦克",
+          "hp": 240,
+          "damage": 14,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 5,
+          "size_scale": 1.25
+        },
+        {
+          "name_cn": "重型高射炮坦克",
+          "hp": 320,
+          "damage": 18,
+          "attack_period": 20,
+          "speed": 3,
+          "range": 5,
+          "size_scale": 1.5
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "key": "envoy_tank",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "特派坦克",
+      "role": "vehicle",
+      "hp": 180,
+      "speed": 4,
+      "range": 4,
+      "damage": 12,
+      "armor": 1,
+      "attack_period": 20,
+      "attack_fx": "laser",
+      "flags": [
+        "tiered"
+      ],
+      "tiers": [
+        {
+          "name_cn": "轻型特派坦克",
+          "hp": 180,
+          "damage": 12,
+          "attack_period": 20,
+          "speed": 4,
+          "range": 4,
+          "size_scale": 1.0
+        },
+        {
+          "name_cn": "中型特派坦克",
+          "hp": 270,
+          "damage": 16,
+          "attack_period": 20,
+          "speed": 4,
+          "range": 4,
+          "size_scale": 1.25
+        },
+        {
+          "name_cn": "重型特派坦克",
+          "hp": 360,
+          "damage": 21,
+          "attack_period": 20,
+          "speed": 4,
+          "range": 4,
+          "size_scale": 1.5
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "key": "aa_tank",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "防空坦克",
+      "role": "vehicle",
+      "hp": 220,
+      "speed": 2,
+      "range": 5,
+      "damage": 18,
+      "armor": 2,
+      "attack_period": 20,
+      "attack_fx": "missile",
+      "flags": [
+        "anti_air",
+        "tiered"
+      ],
+      "tiers": [
+        {
+          "name_cn": "轻型防空坦克",
+          "hp": 220,
+          "damage": 18,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 5,
+          "size_scale": 1.0
+        },
+        {
+          "name_cn": "中型防空坦克",
+          "hp": 330,
+          "damage": 25,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 5,
+          "size_scale": 1.25
+        },
+        {
+          "name_cn": "重型防空坦克",
+          "hp": 440,
+          "damage": 32,
+          "attack_period": 20,
+          "speed": 2,
+          "range": 5,
+          "size_scale": 1.5
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "key": "spare",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "预留单位",
+      "role": "none",
+      "hp": 100,
+      "speed": 3,
+      "range": 3,
+      "damage": 5,
+      "armor": 0,
+      "attack_period": 20,
+      "flags": [],
+      "attack_fx": "line"
+    },
+    {
+      "id": 14,
+      "key": "fighter",
+      "auto_attack_targets": [
+        "units",
+        "turrets",
+        "buildings"
+      ],
+      "name_cn": "战斗机",
+      "role": "summon",
+      "hp": 90,
+      "speed": 6,
+      "range": 3,
+      "damage": 0,
+      "armor": 0,
+      "attack_period": 10,
+      "flags": [
+        "air",
+        "aa_immune",
+        "strike"
+      ],
+      "attack_fx": "line",
+      "strike": {
+        "line_cells": 4,
+        "bombs_per_cell": 1,
+        "fall_ticks": 15,
+        "bomb_radius": 1
+      }
+    },
+    {
+      "id": 15,
+      "key": "chain_bomber",
+      "auto_attack_targets": [],
+      "name_cn": "连环轰炸机",
+      "role": "summon",
+      "hp": 70,
+      "speed": 3,
+      "range": 2,
+      "damage": 90,
+      "armor": 0,
+      "attack_period": 40,
+      "flags": [
+        "air",
+        "splash",
+        "friendly_fire",
+        "strike"
+      ],
+      "attack_fx": "line",
+      "chain": {
+        "strike_interval_ticks": 10,
+        "land_delay_ticks": 10,
+        "ring_diameter_cells": 4.0,
+        "ring_width_cells": 0.5,
+        "hex_radius_cells": 4.0,
+        "triangle_side_cells": 4.0
+      }
+    },
+    {
+      "id": 16,
+      "key": "star_bomb",
+      "auto_attack_targets": [],
+      "name_cn": "星体炸弹",
+      "role": "summon",
+      "hp": 50,
+      "speed": 4,
+      "range": 3,
+      "damage": 0,
+      "armor": 0,
+      "attack_period": 40,
+      "flags": [
+        "air",
+        "splash",
+        "friendly_fire",
+        "random_target",
+        "strike"
+      ],
+      "attack_fx": "line",
+      "meteor": {
+        "radius_cells": 6,
+        "window_ticks": 200,
+        "fall_ticks": 40,
+        "counts": {
+          "meteor_l": 4,
+          "meteor_m": 6,
+          "meteor_s": 10
+        }
+      }
+    },
+    {
+      "id": 17,
+      "key": "bomb",
+      "name_cn": "炸弹",
+      "hp": 1,
+      "speed": 1,
+      "range": 0,
+      "damage": 40,
+      "attack_period": 100,
+      "flags": [
+        "bomb"
+      ],
+      "attack_fx": "line",
+      "attackable": false
+    },
+    {
+      "id": 18,
+      "key": "meteor_l",
+      "name_cn": "大陨石",
+      "hp": 1,
+      "speed": 1,
+      "range": 0,
+      "damage": 400,
+      "attack_period": 100,
+      "flags": [
+        "bomb",
+        "meteor"
+      ],
+      "attack_fx": "line",
+      "attackable": false
+    },
+    {
+      "id": 19,
+      "key": "meteor_m",
+      "name_cn": "中陨石",
+      "hp": 1,
+      "speed": 1,
+      "range": 0,
+      "damage": 200,
+      "attack_period": 100,
+      "flags": [
+        "bomb",
+        "meteor"
+      ],
+      "attack_fx": "line",
+      "attackable": false
+    },
+    {
+      "id": 20,
+      "key": "meteor_s",
+      "name_cn": "小陨石",
+      "hp": 1,
+      "speed": 1,
+      "range": 0,
+      "damage": 100,
+      "attack_period": 100,
+      "flags": [
+        "bomb",
+        "meteor"
+      ],
+      "attack_fx": "line",
+      "attackable": false
+    }
+  ]
+}

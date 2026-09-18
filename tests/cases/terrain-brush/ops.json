@@ -1,0 +1,24 @@
+[
+  {
+    "tool": "terrain"
+  },
+  {
+    "select": "map-select-terrain",
+    "value": "4"
+  },
+  {
+    "dragCell": [
+      [
+        2,
+        2
+      ],
+      [
+        5,
+        4
+      ]
+    ]
+  },
+  {
+    "save": true
+  }
+]

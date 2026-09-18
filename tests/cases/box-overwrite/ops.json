@@ -1,0 +1,44 @@
+[
+  {
+    "tool": "box"
+  },
+  {
+    "select": "map-select-access",
+    "value": "3"
+  },
+  {
+    "select": "map-select-build",
+    "value": "1"
+  },
+  {
+    "dragCell": [
+      [
+        2,
+        2
+      ],
+      [
+        6,
+        4
+      ]
+    ]
+  },
+  {
+    "select": "map-select-access",
+    "value": "1"
+  },
+  {
+    "dragCell": [
+      [
+        4,
+        3
+      ],
+      [
+        8,
+        5
+      ]
+    ]
+  },
+  {
+    "save": true
+  }
+]

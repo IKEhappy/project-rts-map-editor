@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, serializeText } from "./api";
 import { canonicalJson } from "./canonical";
+import { DocHistory } from "./history";
 import EntityList from "./components/EntityList";
 import FieldTree from "./components/FieldTree";
+import MapsPanel, { type MapsPanelHandle } from "./components/MapsPanel";
 import RulesTable from "./components/RulesTable";
 import type { LabelsData } from "./labels";
 import { validateEntityTree, validateRuleValue } from "./light-validation";
@@ -65,10 +67,22 @@ export default function App() {
   // 无框窗口（T-164 R5）：右上自绘控制按钮，最大化状态同步图标
   const [maximized, setMaximized] = useState(false);
   const [unitsCache, setUnitsCache] = useState<Entity[] | null>(null);
+  // 地图编辑（T-164 R7）：面板常驻挂载（切选项卡不丢编辑）；脏计数供关闭守卫
+  const [section, setSection] = useState<"configs" | "maps">("configs");
+  const [mapsDirty, setMapsDirty] = useState(0);
+  const mapsRef = useRef<MapsPanelHandle | null>(null);
+  // 撤销/重做（R9）：三表共用一份历史（键=kind）；地图面板自持。Ctrl+Z/Y 全局路由。
+  const historyRef = useRef(new DocHistory<ConfigFile>());
+  const [historyTick, setHistoryTick] = useState(0);
+  // 关闭三选（R9）：保存并退出 / 不保存退出 / 继续编辑——替代二选 confirm
+  const [closePrompt, setClosePrompt] = useState(false);
+  // R14：buildings.json 在工具内保存的版本（地图页占地/血量默认实时跟随）
+  const [buildingsVersion, setBuildingsVersion] = useState(0);
 
   const load = docs[activeKind] ?? null;
   const dirty = dirtyOf(load);
   const anyDirty = ALL_KINDS.some((kind) => dirtyOf(docs[kind]));
+  const anyDirtyAnywhere = anyDirty || mapsDirty > 0;
 
   useEffect(() => {
     api.onWindowState(setMaximized);
@@ -219,11 +233,22 @@ export default function App() {
     [activeKind],
   );
 
+  /** 提交撤销快照：必须在 setDocs 更新器之外调用（更新器须纯——StrictMode 双调/
+   *  并发渲染下副作用入更新器会重复提交或错序，R10 修正） */
+  const commitHistory = useCallback(
+    (tag: string) => {
+      const state = docs[activeKind];
+      if (state) historyRef.current.commit(activeKind, state.doc, tag);
+    },
+    [docs, activeKind],
+  );
+
   /** 实体变更：以"当前选中实体"为锚替换（新实体改 key 后仍能命中），改名则跟随选中 */
   const onEntityChange = useCallback(
     (next: Entity) => {
       const anchorKey = selected ? String(selected.key) : null;
       if (anchorKey === null) return;
+      commitHistory("field");
       updateActiveDoc((state) => {
         const nextRows = (Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : []).map((row) =>
           String(row.key) === anchorKey ? next : row,
@@ -234,7 +259,7 @@ export default function App() {
         setSelectedKeys((keys) => ({ ...keys, [activeKind]: String(next.key) }));
       }
     },
-    [selected, activeKind, updateActiveDoc],
+    [selected, activeKind, updateActiveDoc, commitHistory],
   );
 
   /** 新实体判定：key 不在已保存原文中（改名/删除的放行依据；既有实体删除仍禁） */
@@ -253,6 +278,7 @@ export default function App() {
         });
         return;
       }
+      commitHistory("delete");
       updateActiveDoc((state) => {
         const rowsNow = Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : [];
         return { ...state, doc: { ...state.doc, [state.kind]: rowsNow.filter((row) => String(row.key) !== key) } };
@@ -266,13 +292,15 @@ export default function App() {
 
   const onRuleChange = useCallback(
     (key: string, value: JsonValue) => {
+      commitHistory("field");
       updateActiveDoc((state) => ({ ...state, doc: { ...state.doc, [key]: value } }));
     },
-    [updateActiveDoc],
+    [updateActiveDoc, commitHistory],
   );
 
   const createFromTemplate = useCallback(
     (tpl: TemplateDef) => {
+      commitHistory("template");
       updateActiveDoc((state) => {
         const rowsNow = Array.isArray(state.doc[state.kind]) ? (state.doc[state.kind] as Entity[]) : [];
         const entity = instantiateTemplate(tpl, rowsNow);
@@ -280,7 +308,7 @@ export default function App() {
         return { ...state, doc: { ...state.doc, [state.kind]: [...rowsNow, entity] } };
       });
     },
-    [updateActiveDoc],
+    [updateActiveDoc, commitHistory],
   );
 
   const doSaveKind = useCallback(
@@ -299,6 +327,7 @@ export default function App() {
         const hash = result.hash ?? state.hash;
         setDocs((prev) => ({ ...prev, [kind]: { ...state, text, hash } }));
         setSaveState({ tone: "ok", written: Boolean(result.written) });
+        if (kind === "buildings") setBuildingsVersion((version) => version + 1); // R14：地图页占地/血量默认实时刷新
         return true;
       }
       setSaveState({ tone: "rejected", code: result.code ?? "error", errors: result.errors ?? ["未知错误"] });
@@ -328,24 +357,63 @@ export default function App() {
   }, [docs, doSaveKind]);
 
   const reload = useCallback(() => {
+    if (section === "maps") {
+      void mapsRef.current?.reloadCurrent();
+      return;
+    }
     if (dirty && !window.confirm("当前表有未保存修改，重新加载将丢弃，确认？")) return;
     setLabelsToken((token) => token + 1);
+    historyRef.current.clear(activeKind);
     loadKind(activeKind, dataDirOverride, true);
-  }, [dirty, activeKind, dataDirOverride, loadKind]);
+  }, [dirty, activeKind, dataDirOverride, loadKind, section]);
+
+  /** 配置表撤销/重做（R9）：当前 kind 的 doc 整体换回历史快照 */
+  const undoRedoKind = useCallback(
+    (dir: -1 | 1) => {
+      const state = docs[activeKind];
+      if (!state || section !== "configs") return;
+      const next = dir < 0 ? historyRef.current.undoFor(activeKind, state.doc) : historyRef.current.redoFor(activeKind, state.doc);
+      if (next === null) return;
+      setDocs((prev) => ({ ...prev, [activeKind]: { ...state, doc: next } }));
+      setHistoryTick((tick) => tick + 1);
+    },
+    [docs, activeKind, section],
+  );
+  void historyTick;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+      const key = event.key.toLowerCase();
+      if (key === "s") {
         event.preventDefault();
+        if (section === "maps") {
+          mapsRef.current?.save();
+          return;
+        }
         if (dirty) save();
+        return;
+      }
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        if (section === "maps") mapsRef.current?.undo();
+        else undoRedoKind(-1);
+        return;
+      }
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        event.preventDefault();
+        if (section === "maps") mapsRef.current?.redo();
+        else undoRedoKind(1);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [dirty, save]);
+  }, [dirty, save, section, undoRedoKind]);
 
   // 选项卡切换（T-164 R6 用户裁定）：不弹窗不丢编辑——每表工作副本常驻，回来还在
   const switchKind = (kind: Kind) => {
+    setSection("configs");
     loadKind(kind);
   };
 
@@ -370,7 +438,7 @@ export default function App() {
             return;
           }
         }
-        if (anyDirty && !window.confirm("有未保存修改，切换数据目录将丢弃全部，确认？")) return;
+        if (anyDirtyAnywhere && !window.confirm("有未保存修改，切换数据目录将丢弃全部，确认？")) return;
         setDataDirOverride(dir);
         setSelectedKeys({ units: "", buildings: "" });
         setDocs({});
@@ -400,19 +468,36 @@ export default function App() {
     }
   }, []);
 
-  // 退出流程（T-164 R6 用户裁定）：关闭时若有未保存 → 询问"保存全部并退出/留在工具"
+  // 退出流程（R9 三选弹窗）：有未保存 → 保存并退出 / 不保存退出 / 继续编辑
   const closeRef = useRef<() => void>(() => {});
   closeRef.current = () => {
+    if (anyDirtyAnywhere) {
+      setClosePrompt(true);
+      return;
+    }
+    void windowCtlSafe("close-now");
+  };
+  const closeSaveAndExit = useCallback(() => {
     void (async () => {
-      if (anyDirty) {
-        const saveAll = window.confirm("有未保存的修改：确定 = 全部保存并退出，取消 = 留在工具");
-        if (!saveAll) return;
-        const ok = await saveAllDirty();
-        if (!ok) return; // 保存失败（如 gate 拒绝）留在工具，横幅已显示原因
+      const okCfg = await saveAllDirty();
+      if (!okCfg) {
+        setClosePrompt(false);
+        return; // 保存失败（如 gate 拒绝）留在工具，横幅已显示原因
       }
+      const okMaps = (await mapsRef.current?.saveAll()) ?? true;
+      if (!okMaps) {
+        setClosePrompt(false);
+        setSection("maps");
+        return;
+      }
+      setClosePrompt(false);
       await windowCtlSafe("close-now");
     })();
-  };
+  }, [saveAllDirty]);
+  const closeDiscardAndExit = useCallback(() => {
+    setClosePrompt(false);
+    void windowCtlSafe("close-now");
+  }, [windowCtlSafe]);
 
   return (
     <div className="app">
@@ -463,6 +548,24 @@ export default function App() {
         <span className={`dirty-dot${dirty ? " on" : ""}`} title={dirty ? "当前表有未保存修改" : "无改动"}>
           ●
         </span>
+        <button
+          className="btn slim"
+          data-testid="undo-btn"
+          onClick={() => (section === "maps" ? mapsRef.current?.undo() : undoRedoKind(-1))}
+          disabled={section !== "maps" && !historyRef.current.canUndo(activeKind)}
+          title="撤销（Ctrl+Z）——地图页的可用态见地图工具栏"
+        >
+          ↶
+        </button>
+        <button
+          className="btn slim"
+          data-testid="redo-btn"
+          onClick={() => (section === "maps" ? mapsRef.current?.redo() : undoRedoKind(1))}
+          disabled={section !== "maps" && !historyRef.current.canRedo(activeKind)}
+          title="重做（Ctrl+Y / Ctrl+Shift+Z）"
+        >
+          ↷
+        </button>
         <button className="btn" data-testid="reload-btn" onClick={reload} disabled={busy || !load}>
           重新加载
         </button>
@@ -517,15 +620,21 @@ export default function App() {
           <button
             key={kind}
             data-testid={`tab-${kind}`}
-            className={`tab${activeKind === kind ? " active" : ""}`}
+            className={`tab${section === "configs" && activeKind === kind ? " active" : ""}`}
             onClick={() => switchKind(kind)}
           >
             {label}
             {dirtyOf(docs[kind]) ? <span className="tab-dirty" title="有未保存修改" /> : null}
           </button>
         ))}
-        <button className="tab disabled" disabled title="地图编辑（规划中，T-164 R7+）">
-          地图（规划中）
+        <button
+          data-testid="tab-maps"
+          className={`tab${section === "maps" ? " active" : ""}`}
+          onClick={() => setSection("maps")}
+          title="dev-2d data/maps 地图编辑（保存过 Godot 真实构建链路门禁）"
+        >
+          地图
+          {mapsDirty > 0 ? <span className="tab-dirty" title={`${mapsDirty} 张地图有未保存修改`} /> : null}
         </button>
       </nav>
 
@@ -566,47 +675,85 @@ export default function App() {
       ) : null}
 
       <main className="content">
-        {load && activeKind !== "rules" ? (
-          <div className="master-detail" key={activeKind}>
-            <EntityList
-              rows={rows}
-              selectedKey={String(selected?.key ?? "")}
-              onSelect={(key) => setSelectedKeys((keys) => ({ ...keys, [activeKind]: key }))}
-              templates={templates}
-              onCreateFromTemplate={createFromTemplate}
-              onDelete={deleteEntity}
-            />
-            <section className="detail">
-              {summonHint ? <div className="banner warn compact">{summonHint}</div> : null}
-              {selected ? (
-                <FieldTree
-                  entity={selected}
-                  original={selectedOriginal}
-                  labels={labelsData}
-                  lightErrors={lightErrors}
-                  unitSuggestions={unitSuggestions}
-                  identityEditable={isNewEntity(String(selected.key))}
-                  onChange={onEntityChange}
-                />
-              ) : (
-                <div className="empty">（空表——可从左下「＋ 从模板新建」创建实体；删除仍不支持）</div>
-              )}
-            </section>
-          </div>
-        ) : null}
-        {load && activeKind === "rules" ? (
-          <RulesTable entries={ruleEntries} original={originalRules} labels={labelsData} lightErrors={lightErrors} onValueChange={onRuleChange} />
-        ) : null}
-        {!load && !loadingError ? <div className="empty">加载中…</div> : null}
+        <div className={section === "configs" ? "configs-mount" : "configs-mount hidden"}>
+          {load && activeKind !== "rules" ? (
+            <div className="master-detail" key={activeKind}>
+              <EntityList
+                rows={rows}
+                selectedKey={String(selected?.key ?? "")}
+                onSelect={(key) => setSelectedKeys((keys) => ({ ...keys, [activeKind]: key }))}
+                templates={templates}
+                onCreateFromTemplate={createFromTemplate}
+                onDelete={deleteEntity}
+              />
+              <section className="detail">
+                {summonHint ? <div className="banner warn compact">{summonHint}</div> : null}
+                {selected ? (
+                  <FieldTree
+                    entity={selected}
+                    original={selectedOriginal}
+                    labels={labelsData}
+                    lightErrors={lightErrors}
+                    unitSuggestions={unitSuggestions}
+                    identityEditable={isNewEntity(String(selected.key))}
+                    onChange={onEntityChange}
+                  />
+                ) : (
+                  <div className="empty">（空表——可从左下「＋ 从模板新建」创建实体；删除仍不支持）</div>
+                )}
+              </section>
+            </div>
+          ) : null}
+          {load && activeKind === "rules" ? (
+            <RulesTable entries={ruleEntries} original={originalRules} labels={labelsData} lightErrors={lightErrors} onValueChange={onRuleChange} />
+          ) : null}
+          {!load && !loadingError ? <div className="empty">加载中…</div> : null}
+        </div>
+        <div className={section === "maps" ? "maps-mount" : "maps-mount hidden"}>
+          <MapsPanel
+            handleRef={mapsRef}
+            labelsData={labelsData}
+            onDirtyChange={setMapsDirty}
+            unitsCache={unitsCache}
+            active={section === "maps"}
+            buildingsVersion={buildingsVersion}
+          />
+        </div>
       </main>
 
       <footer className="statusbar">
         <span>
-          {anyDirty ? `${ALL_KINDS.filter((kind) => dirtyOf(docs[kind])).length} 张表有未保存修改 · ` : ""}
-          {selected ? `${selectedKey} · ` : ""}轻校验告警 {lightErrors.size} 处（仅提示，语义以 Godot 门禁为准）
+          {anyDirtyAnywhere
+            ? `${ALL_KINDS.filter((kind) => dirtyOf(docs[kind])).length + (mapsDirty > 0 ? mapsDirty : 0)} 项有未保存修改 · `
+            : ""}
+          {selected && section === "configs" ? `${selectedKey} · ` : ""}
+          轻校验告警 {section === "maps" ? "（见地图面板）" : `${lightErrors.size} 处`}（仅提示，语义以 Godot 门禁为准）
         </span>
-        <span>{meta ? `data: ${meta.dataDir} · gate: ${meta.gateScript}` : ""}</span>
+        <span>{meta ? `data: ${meta.dataDir} · gate: ${meta.gateScript} · maps: ${meta.mapsDir}` : ""}</span>
       </footer>
+
+      {closePrompt ? (
+        <div className="modal-mask" data-testid="close-modal">
+          <div className="modal">
+            <div className="modal-title">有未保存的修改</div>
+            <div className="modal-body">
+              关闭前如何处理？
+              <div className="modal-hint">「保存并退出」会依次通过 Godot 门禁写盘；被拒绝时会留在工具并显示原因。</div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn primary" data-testid="close-save-btn" onClick={closeSaveAndExit}>
+                保存并退出
+              </button>
+              <button className="btn danger" data-testid="close-discard-btn" onClick={closeDiscardAndExit}>
+                不保存退出
+              </button>
+              <button className="btn" data-testid="close-cancel-btn" onClick={() => setClosePrompt(false)}>
+                继续编辑
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

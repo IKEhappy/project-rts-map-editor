@@ -50,9 +50,74 @@
     "unit": "单位（key）",
     "tier": "档位",
     "ticks": "耗时（tick）",
-    "produce_ticks": "生产耗时（tick）"
+    "produce_ticks": "生产耗时（tick）",
+    "name": "地图名（新图保存按此落盘文件名）",
+    "width": "图宽（格）",
+    "height": "图高（格）",
+    "default_terrain": "默认地形码",
+    "terrain": "地形码",
+    "terrain_patches": "地形补丁（矩形批量覆盖）",
+    "x": "左上 x（列）",
+    "y": "左上 y（行）",
+    "buildings": "建筑（key/占位/队伍）",
+    "team": "队伍",
+    "spawns": "出生点",
+    "count": "数量",
+    "decor": "装饰（纯视觉）",
+    "kind": "种类",
+    "init": "开局设置（金币/科研/集结/出生）",
+    "gold": "初始金币（按队伍）",
+    "rally": "集结点（按队伍）",
+    "seed": "随机种子",
+    "ai_teams": "AI 队伍列表",
+    "ai_difficulty": "AI 难度",
+    "renderer": "渲染配置文件（res://data/render/*.json）",
+    "ground": "地面视觉块（材质/散布区域）",
+    "default_material": "默认地面材质",
+    "patches": "区域补丁",
+    "scatter_regions": "细节散布区域",
+    "scatter_exclude": "散布排除区域",
+    "box_mode": "L2 控制层范围标注（纯显示，不写回 sim）",
+    "start": "范围左上角（闭区间）",
+    "end": "范围右下角（闭区间）",
+    "access": "通行维度",
+    "build": "建造维度",
+    "weather": "天气（type/intensity）",
+    "intensity": "强度",
+    "type": "类型"
   },
   "values": {
+    "terrain": {
+      "0": "可通行",
+      "1": "阻挡（墙）",
+      "2": "山体（禁所有单位）",
+      "3": "水面（禁地面）",
+      "4": "可通行禁建"
+    },
+    "default_terrain": {
+      "0": "可通行",
+      "1": "阻挡（墙）",
+      "2": "山体（禁所有单位）",
+      "3": "水面（禁地面）",
+      "4": "可通行禁建"
+    },
+    "access": {
+      "0": "全通行",
+      "1": "仅禁地面",
+      "2": "仅禁飞碟（预留）",
+      "3": "禁所有单位"
+    },
+    "build": {
+      "0": "可建",
+      "1": "禁建（红框）"
+    },
+    "kind": {
+      "tree": "树"
+    },
+    "type": {
+      "rain": "雨",
+      "snow": "雪"
+    },
     "role": {
       "hq": "飞碟-总部",
       "none": "无",

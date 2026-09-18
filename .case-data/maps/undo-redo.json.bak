@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "_note": "A/B Case 基板",
+  "name": "undo-redo",
+  "width": 16,
+  "height": 12,
+  "default_terrain": 0,
+  "seed": 1,
+  "renderer": "res://data/render/default.json",
+  "ground": {
+    "default_material": "grass"
+  },
+  "box_mode": [],
+  "terrain_patches": [],
+  "buildings": [],
+  "spawns": [],
+  "decor": [],
+  "init": {}
+}

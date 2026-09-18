@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Entity, JsonValue } from "../types";
 import { enumOptions, fieldLabel, type LabelsData } from "../labels";
 import Dropdown, { type DropdownOption } from "./Dropdown";
@@ -28,6 +28,19 @@ const ARRAY_DEFAULTS: Record<string, JsonValue> = {
   color: 0,
 };
 
+/** R30：对象字段可创建默认值——地图条目初始缺 lines/unlocked_lines 等字段时"＋ 新增字段"用 */
+const FIELD_CREATABLE: Record<string, JsonValue> = {
+  lines: [], // 数组：创建空数组后即可"＋ 添加"行
+  unlocked_lines: 1,
+  income: 1,
+  research: 1,
+  speed_up: 1,
+  level: 1,
+  hp: 500,
+  team: 1,
+  count: 1,
+};
+
 /** 锁定增删的对象数组：tiers 固定 3 行（MatchConfig 校验器锁死） */
 const LOCKED_ARRAYS = new Set(["tiers"]);
 
@@ -42,25 +55,83 @@ function deepClone<T extends JsonValue>(value: T): T {
 function NumberInput(props: { value: number; testId: string; onCommit(next: number): void }) {
   const [draft, setDraft] = useState<string | null>(null);
   const text = draft ?? String(props.value);
-  const commit = () => {
-    if (draft === null) return;
-    const parsed = Number(draft);
+  // R13：数字可解析即提交（点步进/逐键即时落文档——旧版只在 blur/回车提交，点 +/- 后
+  // 画布与文档"没反应"即此因）；非法中间态（空串/首 "-"）留在草稿等 blur 丢弃。
+  const commitText = (raw: string | null) => {
+    if (raw === null) return;
+    const parsed = Number(raw);
     if (Number.isFinite(parsed) && parsed !== props.value) props.onCommit(parsed);
+  };
+  const commit = () => {
+    commitText(draft);
     setDraft(null);
   };
+  // 自绘步进（原生 spinner 步进 1 且无加速，大跨度要长按很久）：单击 ±1，
+  // 按住 400ms 后自动重复并逐步加速（间隔 400→50ms），松开/离开即停
+  const holdRef = useRef<{ timer: number | null; delay: number } | null>(null);
+  const stopHold = () => {
+    const state = holdRef.current;
+    if (state && state.timer !== null) window.clearTimeout(state.timer);
+    holdRef.current = null;
+  };
+  useEffect(() => stopHold, []);
+  const stepBy = (dir: number) => {
+    const base = draft !== null && Number.isFinite(Number(draft)) ? Number(draft) : props.value;
+    const next = Math.round((base + dir) * 1e6) / 1e6;
+    setDraft(null);
+    if (Number.isFinite(next) && next !== props.value) props.onCommit(next);
+  };
+  const startHold = (dir: number) => (event: React.PointerEvent) => {
+    event.preventDefault();
+    stopHold();
+    stepBy(dir);
+    const state = { timer: null as number | null, delay: 400 };
+    holdRef.current = state;
+    const tick = () => {
+      stepBy(dir);
+      state.delay = Math.max(50, state.delay / 1.4);
+      state.timer = window.setTimeout(tick, state.delay);
+    };
+    state.timer = window.setTimeout(tick, state.delay);
+  };
   return (
-    <input
-      className="cell num"
-      data-testid={props.testId}
-      type="number"
-      value={text}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
-        if (e.key === "Escape") setDraft(null);
-      }}
-    />
+    <div className="num-cell">
+      <button
+        className="step-btn"
+        data-testid={`${props.testId}-step-down`}
+        title="减（按住加速）"
+        onPointerDown={startHold(-1)}
+        onPointerUp={stopHold}
+        onPointerLeave={stopHold}
+      >
+        −
+      </button>
+      <input
+        className="cell num"
+        data-testid={props.testId}
+        type="number"
+        value={text}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          commitText(e.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") setDraft(null);
+        }}
+      />
+      <button
+        className="step-btn"
+        data-testid={`${props.testId}-step-up`}
+        title="加（按住加速）"
+        onPointerDown={startHold(1)}
+        onPointerUp={stopHold}
+        onPointerLeave={stopHold}
+      >
+        ＋
+      </button>
+    </div>
   );
 }
 
@@ -150,6 +221,71 @@ export default function FieldTree(props: Props) {
     onChange(next);
   };
 
+  /** R30：给对象加字段——下拉选 FIELD_CREATABLE 中未存在的键，或输入自定义键名 */
+  const AddFieldButton = ({ path }: { path: Path }) => {
+    const [open, setOpen] = useState(false);
+    const [name, setName] = useState("");
+    const existing = new Set<string>();
+    let cursor: JsonValue = entity;
+    for (const seg of path) cursor = getAt(cursor as Record<string, JsonValue> | JsonValue[], seg);
+    if (cursor && typeof cursor === "object" && !Array.isArray(cursor)) {
+      for (const k of Object.keys(cursor as Record<string, JsonValue>)) existing.add(k);
+    }
+    const candidates = Object.keys(FIELD_CREATABLE).filter((k) => !existing.has(k));
+    const commit = (fieldName: string) => {
+      if (!fieldName || existing.has(fieldName)) return;
+      const next = deepClone(entity);
+      let cur: Record<string, JsonValue> | JsonValue[] = next;
+      for (const seg of path) cur = getAt(cur, seg);
+      (cur as Record<string, JsonValue>)[fieldName] = deepClone(FIELD_CREATABLE[fieldName] ?? "");
+      onChange(next);
+      setOpen(false);
+      setName("");
+    };
+    return (
+      <div className="add-field-row">
+        {open ? (
+          <>
+            <input
+              className="cell str"
+              data-testid={`add-field-input-${pathKey(path)}`}
+              type="text"
+              placeholder="字段名…"
+              value={name}
+              autoFocus
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commit(name.trim());
+                if (e.key === "Escape") setOpen(false);
+              }}
+            />
+            <button className="mini" data-testid={`add-field-ok-${pathKey(path)}`} title="创建" onClick={() => commit(name.trim())}>✓</button>
+            {candidates.length > 0 ? (
+              <select
+                className="cell"
+                data-testid={`add-field-select-${pathKey(path)}`}
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) commit(e.target.value);
+                }}
+              >
+                <option value="">常用字段…</option>
+                {candidates.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            ) : null}
+            <button className="mini" title="取消" onClick={() => setOpen(false)}>✕</button>
+          </>
+        ) : (
+          <button className="mini add" data-testid={`add-field-btn-${pathKey(path)}`} onClick={() => setOpen(true)}>
+            ＋ 新增字段
+          </button>
+        )}
+      </div>
+    );
+  };
+
   const toggleCollapse = (key: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -161,6 +297,22 @@ export default function FieldTree(props: Props) {
 
   const renderScalar = (field: string, value: JsonValue, path: Path, testId: string): React.ReactNode => {
     const error = lightErrors.get(pathKey(path));
+    // R27：数字字段若在 labels.values 有枚举组（access/build/terrain 等）→ 优先渲染
+    // 自绘 Dropdown（数字值匹配选项 value），不再落到 NumberInput——此前 access=3 在
+    // 抽屉里显示为步进输入框且被工具栏 flex 挤压变形（即用户反复报的"下拉折叠"）。
+    const enumOpts = enumOptions(labels, field);
+    if (typeof value === "number" && enumOpts) {
+      return (
+        <Dropdown
+          value={String(value)}
+          options={enumOpts.map(([v, label]) => ({ value: v, label }))}
+          onChange={(next) => update(path, Number(next))}
+          testId={testId}
+          invalid={Boolean(error)}
+          title={error ?? undefined}
+        />
+      );
+    }
     if (typeof value === "number") {
       return (
         <span className={error ? "rule-error" : undefined} title={error ?? undefined}>
@@ -339,6 +491,7 @@ export default function FieldTree(props: Props) {
               renderFieldRow(childField, childValue, originalChild, childPath, false)
             }
           />
+          <AddFieldButton path={path} />
         </div>
       );
     } else {

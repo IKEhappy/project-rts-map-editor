@@ -7,6 +7,13 @@ contextBridge.exposeInMainWorld('meApi', {
   labels: () => ipcRenderer.invoke('labels:read'),
   read: (kind, dataDir) => ipcRenderer.invoke('config:read', kind, dataDir ?? null),
   save: (payload) => ipcRenderer.invoke('config:save', payload),
+  listMaps: () => ipcRenderer.invoke('maps:list'),
+  readMap: (name) => ipcRenderer.invoke('maps:read', name),
+  saveMap: (payload) => ipcRenderer.invoke('maps:save', payload),
+  renameMap: (payload) => ipcRenderer.invoke('maps:rename', payload),
+  openMapFile: (name) => ipcRenderer.invoke('maps:open-file', name),
+  openMapFolder: (name) => ipcRenderer.invoke('maps:open-folder', name),
+  readIcon: (name) => ipcRenderer.invoke('assets:read-icon', name),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   windowCtl: (action) => ipcRenderer.invoke('window:ctl', action),
   onWindowState: (callback) => {
