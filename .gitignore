@@ -8,5 +8,6 @@ dist/
 release/
 .gate-projects/
 .smoke-data2/
+.probe-data/
 .mimosa.crash.log
 .mimosa/

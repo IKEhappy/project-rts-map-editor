@@ -143,6 +143,62 @@ function getAt(container: Record<string, JsonValue> | JsonValue[], seg: string |
   return (container as Record<string, JsonValue>)[seg] as Record<string, JsonValue> | JsonValue[];
 }
 
+/**
+ * R31：结构共享写入——只沿路径替换父容器，其余子树保持同一引用。
+ * 旧版 update() 用 deepClone(entity)（JSON 往返整棵实体，含 buildings[]/lines[]/tiers[]），
+ * 每次按键都是 O(实体大小)；改后是 O(路径深度)。这同时让 <FieldRow> 的 memo 生效：
+ * 未变更的子树引用不变 → 不重渲染。
+ * 注意：数组元素增删/排序仍用 deepClone（那是有意的整体克隆，见下方 addElement 等）。
+ */
+function setAtPath(root: Record<string, JsonValue>, path: Path, value: JsonValue): Record<string, JsonValue> {
+  const key = path[0];
+  if (path.length === 1) {
+    return { ...root, [key as string]: value };
+  }
+  const child = root[key as string];
+  if (Array.isArray(child)) {
+    const index = path[1] as number;
+    const nextChild = child.slice();
+    nextChild[index] = setAtPathIn(child[index] as Record<string, JsonValue> | JsonValue[], path, 2, value);
+    return { ...root, [key as string]: nextChild };
+  }
+  if (child !== null && typeof child === "object") {
+    return { ...root, [key as string]: setAtPathIn(child as Record<string, JsonValue>, path, 1, value) };
+  }
+  return { ...root, [key as string]: value };
+}
+
+/** setAtPath 的递归体：从 path[from] 开始定位，逐层浅拷贝父容器。 */
+function setAtPathIn(node: Record<string, JsonValue> | JsonValue[], path: Path, from: number, value: JsonValue): JsonValue {
+  const key = path[from];
+  const isLast = from === path.length - 1;
+  if (isLast) {
+    if (Array.isArray(node)) {
+      const arr = (node as JsonValue[]).slice();
+      arr[key as number] = value;
+      return arr;
+    }
+    return { ...(node as Record<string, JsonValue>), [key as string]: value };
+  }
+  const nextSeg = path[from + 1];
+  const child = Array.isArray(node) ? (node as JsonValue[])[key as number] : (node as Record<string, JsonValue>)[key as string];
+  let nextChild: JsonValue;
+  if (child !== null && typeof child === "object") {
+    nextChild = setAtPathIn(child as Record<string, JsonValue> | JsonValue[], path, from + 1, value);
+  } else {
+    // 路径前缀缺失（字段树允许中途新增字段）：按下一段类型造容器
+    let fresh: Record<string, JsonValue> | JsonValue[] = typeof nextSeg === "number" ? [] : {};
+    nextChild = setAtPathIn(fresh, path, from + 1, value);
+  }
+  if (Array.isArray(node)) {
+    const arr = (node as JsonValue[]).slice();
+    arr[key as number] = nextChild;
+    return arr;
+  }
+  return { ...(node as Record<string, JsonValue>), [key as string]: nextChild };
+}
+
+
 function parentAt(root: Entity, path: Path): Record<string, JsonValue> | JsonValue[] {
   let cursor: Record<string, JsonValue> | JsonValue[] = root;
   for (let i = 0; i < path.length - 1; i += 1) {
@@ -172,10 +228,8 @@ export default function FieldTree(props: Props) {
   };
 
   const update = (path: Path, value: JsonValue) => {
-    const next = deepClone(entity);
-    const parent = parentAt(next, path);
-    (parent as Record<string, JsonValue>)[path[path.length - 1] as string] = value;
-    onChange(next);
+    // R31：路径写（结构共享）替代旧的整棵 deepClone——O(路径深度) 而非 O(实体大小)，并保住 memo
+    onChange(setAtPath(entity, path, value));
   };
 
   const removeElement = (path: Path) => {

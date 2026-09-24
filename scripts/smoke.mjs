@@ -118,6 +118,18 @@ async function waitForCdpPage(timeoutMs) {
 
 const sandboxUnits = path.join(sandbox, "units.json");
 
+// 建筑座数从沙盒建筑表动态推导（R31）：此前的断言把 18 写死，建筑表扩到 32 后
+// 「清空搜索恢复全部 18 项」在**未改动的基线上也超时**（2026-09-24 用 git stash A/B 实测确认）。
+// 改为读实际数据——建筑表再扩容也不会再制造假红。
+function buildingCountOf(dir) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "buildings.json"), "utf8"));
+    return Array.isArray(raw.buildings) ? raw.buildings.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** 9223（smoke 专用 CDP 端口，与 dev 的 9222 互不干扰）被占时中止——防止连到残留窗口跑旧构建 */
 async function assertCdpPortFree() {
   try {
@@ -260,7 +272,7 @@ async function main() {
     await click(client, "tab-buildings");
     await waitForEval(
       client,
-      `document.querySelectorAll('[data-testid="entity-item"]').length === 18`,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === ${buildingCountOf(sandbox)}`,
       20000,
       "buildings loaded",
     );
@@ -309,7 +321,7 @@ async function main() {
     await click(client, "tab-buildings");
     await waitForEval(
       client,
-      `document.querySelectorAll('[data-testid="entity-item"]').length === 18`,
+      `document.querySelectorAll('[data-testid="entity-item"]').length === ${buildingCountOf(sandbox)}`,
       20000,
       "buildings items",
     );
@@ -643,7 +655,7 @@ async function main() {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     return JSON.stringify({ x: rect.left + (${cx} - ox + 0.5) * ppc * scale, y: rect.top + (${cy} - oy + 0.5) * ppc * scale });
   })()`,
       );
@@ -839,7 +851,7 @@ async function main() {
     const widthShown = await ev(client, `document.querySelector('[data-testid="field-width"]').value`);
     check("字段值已改 64", widthShown === "64", String(widthShown));
 
-    console.log("[smoke] 4.9955 下拉搜索（建筑 18 项 → 搜 tank 得 6 项 tank_*）");
+    console.log(`[smoke] 4.9955 下拉搜索（建筑 ${buildingCountOf(sandbox)} 项 → 搜 tank 得 6 项 tank_*）`);
     await click(client, "map-tool-building");
     await click(client, "map-select-building");
     const searchShown = await waitForEval(client, `!!document.querySelector('[data-testid="map-select-building-search"]')`, 4000, "search input");
@@ -877,11 +889,11 @@ async function main() {
     );
     const searchCleared = await waitForEval(
       client,
-      `[...document.querySelectorAll('[data-testid^="map-select-building-opt-"]')].filter((o) => o.offsetParent !== null).length === 18`,
+      `[...document.querySelectorAll('[data-testid^="map-select-building-opt-"]')].filter((o) => o.offsetParent !== null).length === ${buildingCountOf(sandbox)}`,
       4000,
-      "restored 18",
+      "restored all buildings",
     );
-    check("清空搜索恢复全部 18 项", searchCleared === true);
+    check(`清空搜索恢复全部建筑项（${buildingCountOf(sandbox)} 座）`, searchCleared === true);
     await click(client, "map-select-building"); // 关闭菜单
 
     console.log("[smoke] 4.996 建筑放置占地（裁定表 hq=4×4）+ 右键调参菜单跳转");
@@ -907,7 +919,7 @@ async function main() {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     const px = rect.left + (${cx} - ox + 0.5) * ppc * scale;
     const py = rect.top + (${cy} - oy + 0.5) * ppc * scale;
     c.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: px, clientY: py }));
@@ -941,12 +953,16 @@ async function main() {
     check("level 新建默认 1", levelVal === "1", String(levelVal));
 
     console.log("[smoke] 4.9965 备注图例 / 占位防重叠 / 出生点右键菜单 / 菜单外点关闭");
-    const notesOk = await ev(
+    // R31：图例默认折叠（把垂直空间还给画布）——先展开再断言颜色含义，覆盖面不变
+    await click(client, "map-notes-toggle");
+    const notesOk = await waitForEval(
       client,
-      `(() => { const t = document.querySelector('[data-testid="map-notes"]')?.textContent ?? ""; return JSON.stringify({ frame: t.includes("红=禁建"), x: t.includes("黄=仅禁地面") && t.includes("蓝=仅禁飞碟") && t.includes("红=禁所有单位") }); })()`,
-    );
+      `(() => { const t = document.querySelector('[data-testid="map-notes"]')?.textContent ?? ""; return (t.includes("红=禁建") && t.includes("黄=仅禁地面") && t.includes("蓝=仅禁飞碟") && t.includes("红=禁所有单位")) ? JSON.stringify({ frame: true, x: true }) : false; })()`,
+      5000,
+      "notes legend expanded",
+    ).catch(() => "{}");
     const notes = JSON.parse(notesOk);
-    check("备注条含框/X 颜色含义图例", notes.frame === true && notes.x === true, notesOk);
+    check("备注条含框/X 颜色含义图例（展开后）", notes.frame === true && notes.x === true, notesOk);
 
     // 占位防重叠：空格 (1,1) 的 hq 足迹(1..4)与已放 hq(2..5) 重叠 → 拒绝 + 数量不变
     // （R22 后点上已有建筑=移动，放置重叠须从空白格触发）

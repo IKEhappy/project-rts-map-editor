@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
+import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import { api, serializeText } from "../api";
 import { canonicalJson } from "../canonical";
 import { DocHistory } from "../history";
@@ -41,6 +41,8 @@ export interface MapDocState {
   hash: string;
   path: string;
   isNew: boolean;
+  /** R31：磁盘原文的一次性解析结果（脏判定与"原值"对照共用，免去每次渲染重复 JSON.parse） */
+  original: ConfigFile;
 }
 
 export interface MapsPanelHandle {
@@ -73,10 +75,11 @@ type SaveState =
   | { tone: "ok"; written: boolean; label: string }
   | { tone: "rejected"; code: string; errors: string[] };
 
+/** 语义脏判定。R31：读 state.original（读取/保存时已解析好），不再每次 JSON.parse(state.text)。 */
 function dirtyOf(state?: MapDocState | null): boolean {
   if (!state) return false;
   try {
-    return canonicalJson(state.doc) !== canonicalJson(JSON.parse(state.text));
+    return canonicalJson(state.doc) !== canonicalJson(state.original);
   } catch {
     return true;
   }
@@ -164,6 +167,8 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   const [buildingDefs, setBuildingDefs] = useState<BuildingDefLike[]>([]);
   // R12：JSON 字段树默认折叠（研发入口），悬浮按钮开合底层抽屉
   const [jsonOpen, setJsonOpen] = useState(false);
+  // R31：底部图例/提示默认折叠——常驻三段说明在 720p 下会显著挤压画布
+  const [notesOpen, setNotesOpen] = useState(false);
   // R14/R20：右键调参菜单（建筑或出生点；命中索引 + 屏幕坐标）
   const [ctxMenu, setCtxMenu] = useState<{ kind: "building" | "spawn"; index: number; x: number; y: number } | null>(null);
   // R17：文件列表右键菜单 + 重命名弹窗
@@ -237,7 +242,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
       } else {
         setDocs((prev) => ({
           ...prev,
-          [name]: { name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false },
+          [name]: { name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
         }));
         setActiveKey(name);
       }
@@ -271,6 +276,8 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
         hash: "",
         path: "（新地图——保存时按文档 name 字段落盘）",
         isNew: true,
+        // 新图无磁盘源：original 取骨架自身（初始即"未脏"，与旧行为一致）
+        original: skeleton,
       },
     }));
     setActiveKey(key);
@@ -319,7 +326,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
         historyRef.current.clear(activeKey);
         setDocs((prev) => ({
           ...prev,
-          [load.name]: { name: load.name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false },
+          [load.name]: { name: load.name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
         }));
         setActiveKey(load.name);
         setSaveState({ tone: "idle" });
@@ -693,7 +700,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
           setDocs((prev) => {
             const next = { ...prev };
             delete next[key];
-            next[targetName] = { name: targetName, doc: state.doc, text, hash, path: result.path ?? state.path, isNew: false };
+            next[targetName] = { name: targetName, doc: state.doc, text, hash, path: result.path ?? state.path, isNew: false, original: state.doc };
             return next;
           });
           setActiveKey(targetName);
@@ -806,11 +813,8 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
 
   const original = useMemo(() => {
     if (!load) return {} as Entity;
-    try {
-      return JSON.parse(load.text) as Entity;
-    } catch {
-      return load.doc as Entity;
-    }
+    // R31：用缓存的 original（读取/保存时解析好）——旧版每次渲染都 JSON.parse(load.text)
+    return load.original as Entity;
   }, [load]);
 
   const fileNames = useMemo(() => new Set(Object.keys(docs)), [docs]);
@@ -866,15 +870,18 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
               ["move-shape", "移动·地形"],
               ["move-render", "移动·渲染"],
             ] as Array<[ToolState["tool"], string]>
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              className={`btn slim tool${toolState.tool === value ? " active" : ""}`}
-              data-testid={`map-tool-${value}`}
-              onClick={() => setToolState((prev) => ({ ...prev, tool: value }))}
-            >
-              {label}
-            </button>
+          ).map(([value, label], index) => (
+            <Fragment key={value}>
+              {/* R31：按 查看/绘制/放置 三段分组，段间插分隔线（分组只影响观感，不改工具语义与 testid） */}
+              {index === 1 || index === 4 || index === 8 ? <span className="tool-sep" aria-hidden="true" /> : null}
+              <button
+                className={`btn slim tool${toolState.tool === value ? " active" : ""}`}
+                data-testid={`map-tool-${value}`}
+                onClick={() => setToolState((prev) => ({ ...prev, tool: value }))}
+              >
+                {label}
+              </button>
+            </Fragment>
           ))}
         </span>
         {toolState.tool === "terrain" ? (
@@ -906,11 +913,22 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             />
           </>
         ) : null}
-        <span className="file-path" title={list?.mapsDir ?? ""}>
-          {list?.ok ? `${list.maps?.length ?? 0} 张 · ${list.mapsDir}` : list?.error ?? "…"}
+        <span className="chip" data-testid="map-count-chip" title={list?.mapsDir ?? ""}>
+          {list?.ok ? (
+            <>
+              <b>{list.maps?.length ?? 0}</b> 张
+              <span className="chip-text">{list.mapsDir}</span>
+            </>
+          ) : (
+            (list?.error ?? "…")
+          )}
         </span>
-        <span className={`dirty-dot${dirty ? " on" : ""}`} title={dirty ? "当前地图有未保存修改" : "无改动"}>
-          ●
+        <span
+          className={`chip${dirty ? " dirty" : ""}`}
+          data-testid="map-dirty-chip"
+          title={dirty ? "当前地图有未保存修改" : "无改动"}
+        >
+          {dirty ? "未保存" : "已同步"}
         </span>
         <button
           className="btn primary"
@@ -1060,21 +1078,36 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             </div>
           ) : null}
           <div className="map-notes" data-testid="map-notes">
-            <div className="map-hint">{TOOL_HINTS[toolState.tool]}</div>
-            <div className="map-hint legend-line">
-              <span className="lg">框：</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "#E5484D" }} />红=禁建</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "transparent", border: "1px dashed #8b919c" }} />无框=可建</span>
-              <span className="lg vsep" />
-              <span className="lg">X：</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "#E5B567" }} />黄=仅禁地面</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "#3E9BE8" }} />蓝=仅禁飞碟</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "#E5484D" }} />红=禁所有单位</span>
-              <span className="lg"><span className="legend-swatch" style={{ background: "transparent", border: "1px dashed #8b919c" }} />无X=全通行</span>
-            </div>
-            <div className="map-hint">
-              轻校验告警 {lightErrors.size} 处（仅提示，语义以 Godot 门禁为准）。地形码：0 可通行 / 1 阻挡 / 2 山体 / 3 水面 / 4 可通行禁建。占位规则：建筑/单位/炮台互不重叠，触发召唤物点位可覆盖。
-            </div>
+            {/* R31：图例/提示默认收起——三段说明常驻会吃掉画布垂直空间；
+                data-testid="map-notes" 保留在容器上（探针断言不断），内容展开后仍在。 */}
+            <button
+              className="map-notes-toggle"
+              data-testid="map-notes-toggle"
+              onClick={() => setNotesOpen((open) => !open)}
+              title={notesOpen ? "收起图例与提示" : "展开图例与提示"}
+            >
+              {notesOpen ? "▾" : "▸"} 图例与提示
+              {lightErrors.size > 0 ? ` · 告警 ${lightErrors.size}` : ""}
+            </button>
+            {notesOpen ? (
+              <>
+                <div className="map-hint">{TOOL_HINTS[toolState.tool]}</div>
+                <div className="map-hint legend-line">
+                  <span className="lg">框：</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "#E5484D" }} />红=禁建</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "transparent", border: "1px dashed #8b919c" }} />无框=可建</span>
+                  <span className="lg vsep" />
+                  <span className="lg">X：</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "#E5B567" }} />黄=仅禁地面</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "#3E9BE8" }} />蓝=仅禁飞碟</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "#E5484D" }} />红=禁所有单位</span>
+                  <span className="lg"><span className="legend-swatch" style={{ background: "transparent", border: "1px dashed #8b919c" }} />无X=全通行</span>
+                </div>
+                <div className="map-hint">
+                  轻校验告警 {lightErrors.size} 处（仅提示，语义以 Godot 门禁为准）。地形码：0 可通行 / 1 阻挡 / 2 山体 / 3 水面 / 4 可通行禁建。占位规则：建筑/单位/炮台互不重叠，触发召唤物点位可覆盖。
+                </div>
+              </>
+            ) : null}
           </div>
           {ctxMenu && load ? (
             ctxMenu.kind === "building" && Array.isArray(load.doc.buildings) ? (

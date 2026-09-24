@@ -1,22 +1,75 @@
+/* ============================================================================
+   设计 token 层（R31 收口，2026-09-24）
+   背景：R1 初版与 R14「美化润色」各定义过一块 :root，后写的静默覆盖前写的——
+   同一变量两套数值、同一选择器多处声明，改样式「没生效」多半源于此。
+   现合并为**唯一** token 源：新样式一律引用变量，禁止再写裸色值/裸尺寸。
+   ========================================================================== */
 :root {
   color-scheme: dark;
-  --bg: #14161a;
-  --bg-panel: #1b1e24;
-  --bg-input: #101216;
-  --bg-hover: #232730;
-  --border: #2a2e35;
-  --border-strong: #394049;
+
+  /* —— 底色（由暗到亮，构成层级）—— */
+  --bg: #0f1116;            /* 应用底 */
+  --bg-panel: #181c23;      /* 面板/工具栏 */
+  --bg-elevated: #1d222b;   /* 浮层/卡片（比面板高一层） */
+  --bg-input: #0c0e12;      /* 输入框 */
+  --bg-hover: #222834;      /* 悬停态 */
+  --bg-sunken: #10131a;     /* 内凹容器（分段控件底、画布底） */
+
+  /* —— 边线 —— */
+  --border: #262c36;
+  --border-strong: #3a4350;
+  --border-subtle: #20242b; /* 行分隔线等极弱线 */
+
+  /* —— 文字 —— */
   --text: #d7dae0;
   --text-dim: #8b919c;
-  --accent: #4da3ff;
+  --text-mute: #5b626e;     /* 更弱：占位/禁用 */
+
+  /* —— 强调（冷蓝）—— */
+  --accent: #5aabff;
+  --accent-soft: rgba(90, 171, 255, 0.14);
+  --accent-line: rgba(90, 171, 255, 0.5);
+  --accent-deep: #2b6cab;   /* 主按钮描边 */
+  --accent-grad-a: #3d7fd6; /* 主按钮渐变起 */
+  --accent-grad-b: #3368b4; /* 主按钮渐变止 */
+  --accent-grad-a-hover: #4689e0;
+  --accent-grad-b-hover: #3a71c0;
+  --selected-bg: #1f3550;   /* 选中项底 */
+
+  /* —— 语义 —— */
   --ok: #3fbf7f;
-  --err: #ff6b6b;
   --warn: #ffc107;
-  --dirty: rgba(255, 193, 7, 0.09);
+  --err: #ff6b6b;
+  --err-strong: #e5484d;
+
+  /* —— 控件尺寸 —— */
   --topbar-h: 42px;
   --workspace-h: 36px;
-  --control-h: 26px;
-  --radius: 8px;
+  --control-h: 28px;        /* R31：26 → 28，缓解中文标签贴边 */
+  --control-h-lg: 32px;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --radius: var(--radius-md); /* 兼容旧引用 */
+
+  /* —— 间距刻度 —— */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+
+  /* —— 阴影 —— */
+  --shadow-sm: 0 3px 12px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+
+  /* —— 语义底色（横幅等）—— */
+  --dirty: rgba(255, 193, 7, 0.09);
+  --dirty-line: rgba(255, 193, 7, 0.35);
+  --info-bg: #182234;
+  --ok-bg: #16301f;
+  --err-bg: #341a1a;
+  --warn-bg: #34291a;
 }
 
 * {
@@ -43,13 +96,13 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2e333c;
+  background: var(--border);
   border-radius: 5px;
   border: 2px solid var(--bg-panel);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a404b;
+  background: var(--border-strong);
 }
 
 ::-webkit-scrollbar-track {
@@ -146,12 +199,12 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .btn.primary {
-  background: #1f4d7a;
-  border-color: #2b6cab;
+  background: var(--accent-grad-b);
+  border-color: var(--accent-deep);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: #255a91;
+  background: var(--accent-grad-a-hover);
 }
 
 .btn.slim {
@@ -164,7 +217,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .dirty-dot {
-  color: #3a3f47;
+  color: var(--text-mute);
   font-size: 10px;
   line-height: 1;
 }
@@ -275,24 +328,24 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .banner.info {
-  background: #182234;
+  background: var(--info-bg);
   border-left-color: var(--accent);
 }
 
 .banner.ok {
-  background: #16301f;
+  background: var(--ok-bg);
   border-left-color: var(--ok);
   color: var(--ok);
 }
 
 .banner.error {
-  background: #341a1a;
+  background: var(--err-bg);
   border-left-color: var(--err);
   color: var(--err);
 }
 
 .banner.warn {
-  background: #34291a;
+  background: var(--warn-bg);
   border-left-color: var(--warn);
   color: var(--warn);
 }
@@ -374,8 +427,8 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .entity-item.active {
-  background: #1f3550;
-  border-color: #2b6cab;
+  background: var(--selected-bg);
+  border-color: var(--accent-deep);
 }
 
 .entity-name {
@@ -413,7 +466,7 @@ input[type="search"]::-webkit-search-cancel-button {
   align-items: flex-start;
   padding: 5px 12px;
   min-height: 36px;
-  border-bottom: 1px solid #20242b;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .field-row:last-child {
@@ -445,7 +498,7 @@ input[type="search"]::-webkit-search-cancel-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #4a505a;
+  color: var(--text-mute);
   cursor: grab;
   opacity: 0;
   transition: opacity 0.12s ease;
@@ -465,7 +518,7 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 80;
   min-width: 140px;
   padding: 4px;
-  background: #171a20;
+  background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
@@ -495,7 +548,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .ctx-option.danger:hover {
-  background: #3a1d1d;
+  background: rgba(229, 72, 77, 0.15);
 }
 
 .field-label {
@@ -704,30 +757,32 @@ button.mini.add:hover:not(:disabled) {
 }
 
 .step-btn {
-  width: 20px;
-  height: 22px;
+  width: 22px;
+  height: 24px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   color: var(--text);
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
   flex-shrink: 0;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
 
 .step-btn:hover {
-  border-color: var(--accent, #4d8fd1);
+  border-color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .step-btn:active {
-  background: rgba(77, 143, 209, 0.25);
+  background: var(--accent-soft);
 }
 
 .cell.dirty {
   background: var(--dirty);
-  box-shadow: inset 0 0 0 1px rgba(255, 193, 7, 0.35);
+  box-shadow: inset 0 0 0 1px var(--dirty-line);
 }
 
 .cell.invalid {
@@ -803,7 +858,7 @@ button.mini.add:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   padding: 4px;
-  background: #171a20;
+  background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
@@ -843,7 +898,7 @@ button.mini.add:hover:not(:disabled) {
 }
 
 .dd-option.selected {
-  background: #1f3550;
+  background: var(--selected-bg);
   color: #cfe4ff;
 }
 
@@ -883,7 +938,7 @@ table.grid {
 
 table.grid th,
 table.grid td {
-  border-bottom: 1px solid #20242b;
+  border-bottom: 1px solid var(--border-subtle);
   padding: 6px 10px;
   white-space: nowrap;
   text-align: left;
@@ -1016,7 +1071,7 @@ table.rules td:first-child {
   z-index: 7;
   padding: 6px 14px;
   border-radius: 999px;
-  border: 1px solid var(--accent, #4d8fd1);
+  border: 1px solid var(--accent, var(--accent));
   background: rgba(20, 24, 32, 0.88);
   color: var(--text);
   cursor: pointer;
@@ -1098,7 +1153,7 @@ table.rules td:first-child {
 }
 
 .map-item.active {
-  border-color: var(--accent, #4d8fd1);
+  border-color: var(--accent, var(--accent));
   background: rgba(77, 143, 209, 0.12);
 }
 
@@ -1126,7 +1181,7 @@ table.rules td:first-child {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: #14171d;
+  background: var(--bg-sunken);
 }
 
 .map-canvas {
@@ -1178,7 +1233,7 @@ table.rules td:first-child {
 }
 
 .maps-toolbar .btn.tool.active {
-  border-color: var(--accent, #4d8fd1);
+  border-color: var(--accent, var(--accent));
   background: rgba(77, 143, 209, 0.18);
 }
 
@@ -1243,7 +1298,7 @@ table.rules td:first-child {
 
 .btn.danger {
   border-color: rgba(229, 72, 77, 0.6);
-  color: #e5484d;
+  color: var(--err-strong);
 }
 
 /* —— R10 崩溃页（错误边界）—— */
@@ -1259,38 +1314,28 @@ table.rules td:first-child {
 }
 
 .crash-detail {
-  background: #14171d;
+  background: var(--bg-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px;
   font-size: 12px;
-  color: #e5484d;
+  color: var(--err-strong);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 50vh;
   overflow: auto;
 }
 
-/* —— R14 美化润色 + 右键调参菜单 —— */
-:root {
-  --bg: #0f1116;
-  --bg-panel: #181c23;
-  --bg-input: #0c0e12;
-  --bg-hover: #222834;
-  --border: #262c36;
-  --border-strong: #3a4350;
-  --accent: #5aabff;
-  --accent-soft: rgba(90, 171, 255, 0.14);
-  --radius: 9px;
-}
-
+/* —— R14 美化润色 + 右键调参菜单 ——
+   R31：原先此处又定义了一块 :root（与文件头重复、静默覆盖）——已合并到顶部 token 层，
+   本段仅保留具体的组件润色规则。 */
 body {
-  background: linear-gradient(180deg, #0f1116 0%, #12151c 100%);
+  background: linear-gradient(180deg, var(--bg) 0%, var(--bg) 100%);
 }
 
 .btn,
 .btn.slim {
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   transition: border-color 0.12s ease, background 0.12s ease, transform 0.06s ease;
 }
 
@@ -1303,21 +1348,22 @@ body {
   transform: translateY(1px);
 }
 
+/* R31：主按钮基础声明在前段（.btn.primary 用 --accent-deep 描边），此处仅补渐变底 */
 .btn.primary {
-  background: linear-gradient(180deg, #3d7fd6 0%, #3368b4 100%);
-  border-color: #2c5a9e;
+  background: linear-gradient(180deg, var(--accent-grad-a) 0%, var(--accent-grad-b) 100%);
+  border-color: var(--accent-deep);
   color: #fff;
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: linear-gradient(180deg, #4689e0 0%, #3a71c0 100%);
+  background: linear-gradient(180deg, var(--accent-grad-a-hover) 0%, var(--accent-grad-b-hover) 100%);
 }
 
 /* 工具组分段控件观感 */
 .maps-toolbar .tool-group {
-  background: #10131a;
+  background: var(--bg-sunken);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   padding: 3px;
   gap: 2px;
 }
@@ -1325,7 +1371,7 @@ body {
 .maps-toolbar .btn.tool {
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
   padding: 3px 10px;
 }
@@ -1337,27 +1383,21 @@ body {
 
 .maps-toolbar .btn.tool.active {
   color: #fff;
-  background: linear-gradient(180deg, #3d7fd6 0%, #3368b4 100%);
+  background: linear-gradient(180deg, var(--accent-grad-a) 0%, var(--accent-grad-b) 100%);
   box-shadow: 0 1px 6px rgba(61, 127, 214, 0.35);
 }
 
-/* 地图列表卡片化 */
+/* 地图列表卡片化（R14；R31 合并：基础声明见前段 .map-list/.map-item，此处只保留增量） */
 .map-list {
   gap: 5px;
-  padding: 8px;
+  padding: var(--sp-2);
 }
 
 .map-item {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 7px 10px;
-  border: 1px solid transparent;
   transition: background 0.12s ease, border-color 0.12s ease;
   font-size: 12.5px;
-}
-
-.map-item:hover {
-  background: var(--bg-hover);
-  border-color: var(--border);
 }
 
 .map-item.active {
@@ -1373,7 +1413,7 @@ body {
 
 /* 图例芯片 */
 .map-canvas-legend .legend-item {
-  background: #10131a;
+  background: var(--bg-sunken);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 1px 8px;
@@ -1471,7 +1511,7 @@ body {
 }
 
 .json-target-name {
-  color: var(--ok, #3fbf7f);
+  color: var(--ok, var(--ok));
   margin-right: 10px;
 }
 
@@ -1658,7 +1698,7 @@ body {
 }
 
 .ctx-item.danger-item {
-  color: #ff6b6b;
+  color: var(--err);
 }
 
 .ctx-item.danger-item:hover {
@@ -1679,4 +1719,146 @@ body {
 .add-field-row select.cell {
   width: auto;
   min-width: 90px;
+}
+
+/* ============================================================================
+   R31 交互与观感（2026-09-24）
+   —— 焦点可见性、动效偏好、工具栏分组、统计芯片。全部只引 token，无裸色值。
+   ========================================================================== */
+
+/* —— 键盘焦点环 ——
+   旧版 input:focus 只换 border-color，Tab 导航时几乎看不出焦点在哪。
+   用 :focus-visible 区分「键盘聚焦」与「鼠标点击聚焦」，后者不给环以免视觉噪声。 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* 输入框自带边框，焦点环改为描边加深而非外环（避免与 border 叠出双线） */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+.cell:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* —— 动效偏好：系统设为"减少动态效果"时关掉位移动画与过渡 —— */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* —— 工具栏分组分隔（R31：11 个工具按钮按 查看/绘制/放置 三段，段间插此线）—— */
+.tool-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 3px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+/* —— 统计芯片（R31：把游离的裸文字/裸 ● 字符收成圆角 pill）—— */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.chip .chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.chip.dirty {
+  border-color: var(--dirty-line);
+  color: var(--warn);
+  background: var(--dirty);
+}
+
+.chip.dirty::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex-shrink: 0;
+}
+
+/* 顶栏 brand：主名 + 次名两级（当前是单串文字，缺层级） */
+.brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.brand .brand-sub {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+/* —— 横幅进入动画（配合 prefers-reduced-motion 自动禁用）—— */
+@keyframes banner-in-kf {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.banner {
+  animation: banner-in-kf 0.16s ease-out;
+}
+
+/* —— 底部备注条折叠（R31：图例/提示默认收起，把垂直空间还给画布）—— */
+.map-notes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-mute);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.map-notes-toggle:hover {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
 }

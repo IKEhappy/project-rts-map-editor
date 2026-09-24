@@ -98,7 +98,7 @@ async function runOps(client, ops) {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     const px = rect.left + (${cx} - ox + 0.5) * ppc * scale;
     const py = rect.top + (${cy} - oy + 0.5) * ppc * scale;
     for (const t of ["mousedown", "mouseup", "click"]) c.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, clientX: px, clientY: py }));
@@ -118,7 +118,7 @@ async function runOps(client, ops) {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     const [px0, py0] = [${pt(x0, y0)}];
     const [px1, py1] = [${pt(x1, y1)}];
     c.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: px0, clientY: py0 }));
@@ -138,7 +138,7 @@ async function runOps(client, ops) {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     c.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + (${cx} - ox + 0.5) * ppc * scale, clientY: rect.top + (${cy} - oy + 0.5) * ppc * scale }));
     return "ok";
   })()`,

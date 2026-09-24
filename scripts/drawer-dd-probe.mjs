@@ -63,7 +63,7 @@ async function main() {
     const ppc = parseFloat(c.getAttribute("data-ppc"));
     const ox = parseFloat(c.getAttribute("data-ox"));
     const oy = parseFloat(c.getAttribute("data-oy"));
-    const scale = rect.width / c.width;
+    const scale = rect.width / (parseFloat(c.getAttribute("data-css-w")) || c.width);
     const px0 = rect.left + (4 - ox + 0.5) * ppc * scale;
     const py0 = rect.top + (3 - oy + 0.5) * ppc * scale;
     const px1 = rect.left + (8 - ox + 0.5) * ppc * scale;

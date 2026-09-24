@@ -31,11 +31,26 @@ export function valueLabel(labels: LabelsData, field: string, value: string): st
   return zh ? `${value}（${zh}）` : value;
 }
 
-/** 该字段是否有枚举值映射（决定用下拉还是文本框） */
+/**
+ * 该字段是否有枚举值映射（决定用下拉还是文本框）。
+ * R31：加一层按 (labels 身份, field) 的记忆化——FieldTree 每个字段行都调它，而一次渲染里
+ * 同一 field 会被问很多次（buildings[] 展开 + lines[] 嵌套时尤为明显），且 labels 在会话内
+ * 基本不变。缓存以 labels 对象为 WeakMap 键，labels 换了（重新加载）自然失效。
+ */
+const enumCache = new WeakMap<LabelsData, Map<string, Array<[string, string]> | null>>();
+
 export function enumOptions(labels: LabelsData, field: string): Array<[string, string]> | null {
+  let perLabels = enumCache.get(labels);
+  if (!perLabels) {
+    perLabels = new Map();
+    enumCache.set(labels, perLabels);
+  }
+  const cached = perLabels.get(field);
+  if (cached !== undefined) return cached;
   const map = labels.values?.[field];
-  if (!map) return null;
-  return Object.entries(map).map(([value, zh]) => [value, `${value}（${zh}）`] as [string, string]);
+  const computed = map ? Object.entries(map).map(([value, zh]) => [value, `${value}（${zh}）`] as [string, string]) : null;
+  perLabels.set(field, computed);
+  return computed;
 }
 
 /** 规则键显示 */

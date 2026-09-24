@@ -229,6 +229,57 @@ effective/impact 视图为 R8+。
     地图条目 `lines`（全量覆盖 def 默认表，0..5 线）与 `unlocked_lines`（覆盖默认 1）
     在 sim 层以更高优先级生效——地图编辑只写地图 JSON，buildings.json/unit 表不受影响。
 
+- **R31（2026-09-24）性能优化 + UI 美化（用户裁定：精炼工具风 + DPR backing store +
+  整数档位缩放吸附）**：
+  - **画布静态层真正解耦**（头号性能病灶）：旧版 `rebuildStatic` 的 useCallback 直接喂给
+    effect 依赖数组，而该回调依赖整份组件闭包——**鼠标每移动一格都重建整张离屏位图**
+    （含重设 `width` 触发的位图重分配），是 R10 黑屏事故同族病灶的残留。改为按字段拆开的
+    原始值依赖（指针层 state 一律不入列）+ 尺寸未变不重设 backing store。
+    **回归读数**：新增画布 `data-static-builds` 计数器，划过画布 100 次从「≈100」降到「0」
+    （实测 2→2，那 2 次来自加载与尺寸自适应）。
+  - **地形栅格增量维护**（新模块 `src/renderer/terrain-grid.ts`）：旧版每次 doc 变化都
+    `new Int8Array(w*h)` + 遍历全部补丁逐格覆写（128×128 图 = 16384 格）。改为缓存 +
+    逐条补丁 diff，只重刷变化点及其后的补丁；补丁语义未变则零工作。抽出纯函数并有单测
+    保证与全量重建**逐格等价**（含 100 步随机差分）。
+  - **整数档位缩放**（新模块 `src/renderer/zoom-ladder.ts`）：旧版 `zoom *= 1.15` 是连续
+    缩放，且存在**单调性缺陷**——baseCell 随图尺寸变化（48 宽=10、64 宽=7、96 宽=5），
+    同一 zoom 序列在不同图上 ppc 步长不等，baseCell=16 时 zoom 0.35→0.5 会让 ppc 从
+    5.6 **升到** 8（缩小反而变大）。改为以「每格 CSS 像素 ppc」为唯一真相、在整数阶梯上
+    前后移动一格、zoom 反推；`wheelDirection` 兼容像素/行/页三种 deltaMode 并吸收触控板惯性。
+  - **DPR backing store**：画布内部分辨率改为 CSS 尺寸 × `devicePixelRatio`，两条渲染路径
+    统一 `ctx.setTransform(dpr,0,0,dpr,0,0)`——现有坐标计算（CSS 像素语义）与命中测试
+    **一行未改**，DPR 影响收敛到一处。新增 `data-css-w/h`、`data-dpr` 读数。
+  - **探针尺度修正**：`canvas.width` 此后是物理像素，探针原有的 `rect.width / canvas.width`
+    缩放推算会静默算错 dpr 倍（实测导致笔刷/box 三类落盘断言全红）。全部改为读 `data-css-w`
+    （`smoke.mjs`/`case-runner.mjs`/`drawer-dd-probe.mjs`/`place-probe.mjs` 共 7 处）。
+  - **字段树路径写 + 按行 memo**：`update()` 从「整棵实体 `JSON.parse(JSON.stringify())`」
+    改为沿路径浅拷贝父容器（结构共享），成本从 O(实体大小) 降到 O(路径深度)；未变更子树
+    引用不变，为后续行级 memo 铺路。数组增删/排序仍用整体克隆（有意为之）。
+  - **枚举选项记忆化**：`enumOptions` 加按 (labels 身份, field) 的 WeakMap 缓存——每个字段行
+    都调它，一次渲染里同一 field 会被问很多次。
+  - **样式收口为单一 token 层**：R1 初版与 R14「美化润色」各定义过一块 `:root`，后写静默
+    覆盖前写（同一变量两套数值、`.map-json-fab` 三处、`.map-item.active` 两处……），改样式
+    「没生效」多半源于此。现合并为唯一 token 源（底色/边线/文字/强调/语义/尺寸/间距/阴影/
+    语义底色九组），21 处硬编码色收编为变量。
+  - **交互与观感**：补 `:focus-visible` 键盘焦点环（旧版 `input:focus` 只换边框色，Tab 导航
+    看不出焦点）；`@media (prefers-reduced-motion: reduce)` 关动效；工具按钮按
+    **查看/绘制/放置** 三段分组插分隔线（不改 testid 与工具语义）；工具栏统计信息与脏标记
+    收成圆角芯片（旧版是裸文字 + 裸 `●` 字符）；底图例/提示默认折叠（把垂直空间还给画布）；
+    顶栏 brand 改两级（`Them: Pixel Front · 地图编辑器`）。
+  - **脏判定缓存**：`LoadState`/`MapDocState` 新增 `original`（读取/保存时一次性解析），
+    取代每次渲染的 `JSON.parse(state.text)`（脏判定、`originalRows`、`originalRules`、
+    地图面板 `original` 四处共用）。
+  - **门禁修复：三处写死的建筑座数断言**。「清空搜索恢复全部 18 项」等 3 处断言把建筑座数
+    写死为 18，而 `buildings.json` 已扩到 **32 座**——该断言在**未改动的基线上同样超时**
+    （2026-09-24 用 `git stash` A/B 实测确认，非本轮引入）。改为从沙盒建筑表动态推导
+    （`buildingCountOf`），建筑表再扩容不会再制造假红。
+  - **门禁调整：图例默认折叠的断言跟随**。R31 把底部图例/提示改为默认折叠（还垂直空间给
+    画布），原断言直接读 `map-notes` 文本会失败——改为**先点开 `map-notes-toggle` 再断言**，
+    颜色含义的覆盖面不变。
+  - **新增脚本**：`npm run typecheck`、`npm run test:unit`（`node --test`，19 断言）、
+    `npm run gate`（typecheck + 单测 + build + smoke 串跑）、`scripts/r31-shots.mjs`
+    （分辨率矩阵与 DPR 截图 + 性能读数）。
+
 - **冒烟**：`npm run smoke` 含地图段 71 断言（……前述全部 + **改名保存全链路：默认名
   防撞 / 中文名保留 / 中文文件经 Godot 门禁落盘**）。
 - **冒烟**：`npm run smoke` 含地图段 40 断言（……前述全部 + **放置 hq 占地 4×4（裁定表）/

@@ -26,6 +26,8 @@ interface LoadState {
   text: string;
   hash: string;
   path: string;
+  /** R31：磁盘原文的一次性解析结果（脏判定与"原值"对照共用，免去每次渲染重复 JSON.parse） */
+  original: ConfigFile;
 }
 
 type SaveState =
@@ -34,11 +36,12 @@ type SaveState =
   | { tone: "ok"; written: boolean }
   | { tone: "rejected"; code: string; errors: string[] };
 
-/** 语义脏判定（canonicalJson：数字归一/键序无关/忽略空白）——纯打开或格式差异不算脏 */
+/** 语义脏判定（canonicalJson：数字归一/键序无关/忽略空白）——纯打开或格式差异不算脏。
+ *  R31：读 state.original（加载/保存时已解析好）而非每次 JSON.parse(state.text)。 */
 function dirtyOf(state?: LoadState | null): boolean {
   if (!state) return false;
   try {
-    return canonicalJson(state.doc) !== canonicalJson(JSON.parse(state.text));
+    return canonicalJson(state.doc) !== canonicalJson(state.original);
   } catch {
     return true;
   }
@@ -151,7 +154,7 @@ export default function App() {
       } else {
         setDocs((prev) => ({
           ...prev,
-          [kind]: { kind, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path! },
+          [kind]: { kind, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, original: result.data! },
         }));
         setActiveKind(kind);
       }
@@ -173,7 +176,8 @@ export default function App() {
 
   const originalRows: Entity[] = useMemo(() => {
     if (!load || activeKind === "rules") return [];
-    const value = JSON.parse(load.text)[activeKind];
+    // R31：读缓存的 original（加载/保存时解析好），不再每次 JSON.parse(load.text)
+    const value = load.original[activeKind];
     return Array.isArray(value) ? (value as Entity[]) : [];
   }, [load, activeKind]);
 
@@ -219,7 +223,8 @@ export default function App() {
 
   const originalRules = useMemo(() => {
     if (!load || activeKind !== "rules") return {} as Record<string, JsonValue>;
-    return JSON.parse(load.text) as Record<string, JsonValue>;
+    // R31：同上——用缓存的 original
+    return load.original as Record<string, JsonValue>;
   }, [load, activeKind]);
 
   const updateActiveDoc = useCallback(
@@ -325,7 +330,8 @@ export default function App() {
       if (result.ok) {
         const text = serializeText(state.doc);
         const hash = result.hash ?? state.hash;
-        setDocs((prev) => ({ ...prev, [kind]: { ...state, text, hash } }));
+        // R31：写盘成功后 original 跟进为刚写入的文档——否则保存完仍被判脏
+        setDocs((prev) => ({ ...prev, [kind]: { ...state, text, hash, original: state.doc } }));
         setSaveState({ tone: "ok", written: Boolean(result.written) });
         if (kind === "buildings") setBuildingsVersion((version) => version + 1); // R14：地图页占地/血量默认实时刷新
         return true;
@@ -502,7 +508,10 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">WarOfState · map-editor</span>
+        <span className="brand">
+          Them: Pixel Front
+          <span className="brand-sub">地图编辑器</span>
+        </span>
         <span className="file-path" title={load?.path ?? ""}>
           {load?.path ?? "…"}
         </span>
