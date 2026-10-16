@@ -25,6 +25,13 @@ export interface SaveResult {
   code?: string;
 }
 
+export interface ConfigSavePayload {
+  kind: Kind;
+  data: ConfigFile;
+  baseHash: string;
+  workspaceId?: string;
+}
+
 // —— 地图编辑（T-164 R7）：dev-2d data/maps/*.json 多文件 ——
 
 export interface MapFileMeta {
@@ -66,4 +73,27 @@ export interface MetaResult {
   mapsDir: string;
   mapProject: string;
   mapGateScript: string;
+}
+
+export interface WorkspaceSession {
+  id: string;
+  generation: number;
+  root: string;
+  projectRoot: string;
+  dataDir: string;
+  resPrefix: string;
+  offline: boolean;
+  baseline: { id: string; createdAt: string; zipPath: string; fileCount: number; totalBytes: number };
+}
+
+export interface WorkspaceResult { ok: boolean; workspace?: WorkspaceSession; error?: string }
+export interface CompareEntry { path: string; status: "added" | "removed" | "changed" | "unchanged"; kind: string }
+export interface CompareResult { ok: boolean; entries?: CompareEntry[]; counts?: Record<string, number>; error?: string }
+export interface BackgroundImageInfo { path: string; width?: number; height?: number; dataUrl?: string; error?: string }
+export interface BackgroundInfo {
+  ok: boolean;
+  source: "map" | "renderer" | "none";
+  background: Partial<Record<"tilt" | "topdown" | "image", string>>;
+  images: Partial<Record<"tilt" | "topdown" | "image", BackgroundImageInfo>>;
+  errors: string[];
 }

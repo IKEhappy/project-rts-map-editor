@@ -7,12 +7,19 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
+const assets = require('./assets.cjs');
+let workspaceService = null;
+let imageDecoder = null;
+function configureWorkspace(service, nativeImage) { workspaceService = service; imageDecoder = nativeImage; }
+function workspace(id) {
+  if (!workspaceService || !id) throw new Error('请先选择地图文件夹');
+  return workspaceService.current(id);
+}
 
 const TOOL_ROOT = path.resolve(__dirname, '..', '..'); // map-editor/
 const REPO_ROOT = path.resolve(TOOL_ROOT, '..'); // 仓库根（WarOfState-Remake/）
-const GATE_CANDIDATE_DIR = path.join(TOOL_ROOT, '.gate');
-const GATE_PROJECTS_DIR = path.join(TOOL_ROOT, '.gate-projects'); // 导入目录的 gate 沙盒
 const GATE_RESULT_PREFIX = 'GATE_RESULT ';
 const DEFAULT_GODOT = 'D:\\envir\\GodotEngine\\Godot_v4.7.2-stable_win64_console.exe';
 const DATA_FILES = ['units.json', 'buildings.json', 'rules.json'];
@@ -30,16 +37,12 @@ function serialize(data) {
 }
 
 function env() {
-  // 打包成品布局：resources/app（本脚本）/ resources/war-of-state（gate 工程子集）/
-  // resources/godot（内置 Godot）——与开发态 map-editor/../war-of-state 同构，
-  // TOOL_ROOT/REPO_ROOT 相对解析无需分叉，仅 godotExe 需优先找内置副本。
-  // 2026-09-17（T-164 R7）：默认工程按存在性解析——姊妹检出 war-of-state 优先
-  //（打包/旧布局），否则本工作区 dev-2d（project-rts，数据与校验权威同源）。
+  // Portable resources mirror the development layout; retain the legacy fallback.
   const repoRoot = path.resolve(TOOL_ROOT, '..');
   const bundledGodot = path.join(repoRoot, 'godot', 'Godot_v4.7.2-stable_win64_console.exe');
   const legacyProject = path.join(repoRoot, 'war-of-state');
   const dev2dProject = path.join(repoRoot, 'project-rts');
-  const defaultProject = fs.existsSync(path.join(legacyProject, 'src')) ? legacyProject : dev2dProject;
+  const defaultProject = fs.existsSync(path.join(dev2dProject, 'src')) ? dev2dProject : legacyProject;
   return {
     dataDir: process.env.ME_DATA_DIR || path.join(defaultProject, 'data'),
     godotProject: process.env.ME_GODOT_PROJECT || defaultProject,
@@ -52,15 +55,6 @@ function env() {
 
 function isKind(kind) {
   return Object.prototype.hasOwnProperty.call(FILES, kind);
-}
-
-// —— 数据目录解析（T-164 R4：支持导入外部 data 级文件夹）——
-function samePath(a, b) {
-  return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
-}
-
-function resolveDataDir(explicit) {
-  return explicit && String(explicit).trim().length > 0 ? path.resolve(String(explicit).trim()) : env().dataDir;
 }
 
 function validateDataDir(explicit) {
@@ -95,8 +89,10 @@ function meta() {
   };
 }
 
-function readKind(kind, dataDir) {
-  const file = path.join(resolveDataDir(dataDir), FILES[kind]);
+function readKind(kind, workspaceId) {
+  if (!isKind(kind)) throw new Error('未知配置表');
+  const file = assets.regularFile(workspace(workspaceId).dataDir, FILES[kind]);
+  assets.readJson(file);
   const text = fs.readFileSync(file, 'utf8');
   return {
     ok: true,
@@ -120,39 +116,90 @@ function readLabels() {
   }
 }
 
-function saveKind({ kind, data, baseHash, dataDir }) {
-  const dir = resolveDataDir(dataDir);
-  const file = path.join(dir, FILES[kind]);
+// Optional editor-only schemas. Missing/corrupt files fall back to renderer RAM.
+function readEditorTemplates() {
+  const file = path.join(TOOL_ROOT, 'entity-templates.json');
+  try { return { ok: true, data: assets.readJson(assets.regularFile(TOOL_ROOT, 'entity-templates.json')), path: file }; }
+  catch (error) { return { ok: false, error: String(error.message || error), path: file }; }
+}
+
+function configPath(workspaceId, relative, { optional = false } = {}) {
+  const dir = workspace(workspaceId).dataDir;
+  // Resolve a required sibling first to verify every ancestor of the bound data directory.
+  assets.regularFile(dir, 'rules.json');
+  const full = path.join(dir, relative);
+  try { fs.lstatSync(full); return assets.regularFile(dir, relative); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!optional) throw new Error(`配置文件不存在：${relative}`);
+  return full;
+}
+
+function configText(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('配置根节点必须为对象');
+  const text = JSON.stringify(data, (key, value) => {
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufeff\ufffe\uffff]/.test(key)
+        || (typeof value === 'string' && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufeff\ufffe\uffff]/.test(value))) throw new Error('配置包含非法控制字符');
+    if ((typeof value === 'number' && !Number.isFinite(value)) || value === undefined || ['bigint', 'function', 'symbol'].includes(typeof value)) throw new Error('配置含非 JSON 值');
+    return value;
+  }, 2) + '\n';
+  if (Buffer.byteLength(text, 'utf8') > assets.MAX_BYTES) throw new Error('配置超过 32 MiB 上限');
+  return text;
+}
+
+function writeDurable(file, bytes) {
+  const fd = fs.openSync(file, 'wx');
+  try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+}
+
+function saveKind({ kind, data, baseHash, workspaceId, dataDir }) {
+  if (!isKind(kind)) return { ok: false, code: 'usage', errors: ['未知配置表'] };
+  const ws = workspace(workspaceId);
+  if (dataDir != null) return { ok: false, code: 'usage', errors: ['配置目录由当前地图工作区绑定，不可另选 dataDir'] };
+  let text;
+  try { text = configText(data); }
+  catch (error) { return { ok: false, code: 'usage', errors: [error.message] }; }
+  const file = configPath(workspaceId, FILES[kind]);
+  assets.readJson(file);
   const current = fs.readFileSync(file, 'utf8');
   if (sha256(current) !== baseHash) {
     return { ok: false, code: 'conflict', errors: ['文件在加载后被外部修改，请点「重新加载」后再编辑'] };
   }
-  const text = serialize(data);
   if (text === current) {
     return { ok: true, written: false, reason: 'unchanged', hash: baseHash, errors: [] };
   }
-  const gate = runGate(['check', '--kind', kind, '--candidate', writeCandidate(kind, text)], dir);
+  const siblingHashes = new Map(DATA_FILES.map((name) => [name, sha256(fs.readFileSync(configPath(workspaceId, name)))]));
+  const candidateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-config-candidate-'));
+  const candidate = path.join(candidateDir, `${crypto.randomUUID()}.json`);
+  let gate;
+  try {
+    writeDurable(candidate, text);
+    gate = runGate(['check', '--kind', kind, '--candidate', candidate], workspaceId);
+  } finally { fs.rmSync(candidateDir, { recursive: true, force: true }); }
   if (!gate.ok) {
     return { ok: false, code: 'gate', errors: gate.errors };
   }
-  fs.copyFileSync(file, `${file}.bak`);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, text, 'utf8');
-  fs.renameSync(tmp, file);
+  if (workspace(workspaceId).dataDir !== ws.dataDir || DATA_FILES.some((name) => sha256(fs.readFileSync(configPath(workspaceId, name))) !== siblingHashes.get(name))) {
+    return { ok: false, code: 'conflict', errors: ['校验期间配置文件被外部修改，未保存，请重新加载'] };
+  }
+  const backup = configPath(workspaceId, `${FILES[kind]}.bak`, { optional: true });
+  const tmp = `${file}.${crypto.randomUUID()}.tmp`;
+  const backupTmp = `${backup}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeDurable(tmp, text);
+    writeDurable(backupTmp, current);
+    configPath(workspaceId, FILES[kind]);
+    configPath(workspaceId, `${FILES[kind]}.bak`, { optional: true });
+    if (sha256(fs.readFileSync(file, 'utf8')) !== baseHash) return { ok: false, code: 'conflict', errors: ['落盘前配置被外部修改，未保存'] };
+    fs.renameSync(backupTmp, backup);
+    fs.renameSync(tmp, file);
+  } finally {
+    for (const temporary of [tmp, backupTmp]) if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
   return { ok: true, written: true, hash: sha256(text), errors: [] };
 }
 
-function writeCandidate(kind, text) {
-  fs.mkdirSync(GATE_CANDIDATE_DIR, { recursive: true });
-  const candidate = path.join(GATE_CANDIDATE_DIR, `candidate-${kind}.json`);
-  fs.writeFileSync(candidate, text, 'utf8');
-  return candidate;
-}
-
-// —— 导入目录的 gate 沙盒工程（T-164 R4）——
-// gate 校验语义是"候选 vs 同目录其余数据"：外部目录若仍用默认工程对照，键集错位会假报
-// 增删实体。为每个导入目录生成独立最小工程（project.godot + src 副本 + --import 类缓存），
-// 每次校验前刷新三个 json 副本；src 变化（文件数+字节数标记）自动重建。
+// 每次校验使用一次性工程：可信源码、当前工作区三表、无界面 autoload 和独立用户目录。
 const MINIMAL_PROJECT_GODOT = [
   '; map-editor gate 沙盒工程（自动生成，仅供 config_gate.gd 校验，勿手动改动）',
   'config_version=5',
@@ -163,85 +210,42 @@ const MINIMAL_PROJECT_GODOT = [
   '',
 ].join('\n');
 
-function dirSlug(dataDir) {
-  return crypto.createHash('sha1').update(path.resolve(dataDir).toLowerCase()).digest('hex').slice(0, 12);
-}
-
-function treeMarker(dir) {
-  let count = 0;
-  let size = 0;
-  const walk = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else {
-        count += 1;
-        size += fs.statSync(full).size;
-      }
-    }
-  };
-  if (fs.existsSync(dir)) walk(dir);
-  return `${count}:${size}`;
-}
-
-function gateProjectFor(dataDir) {
-  const e = env();
-  const dir = resolveDataDir(dataDir);
-  if (samePath(dir, e.dataDir)) return e.godotProject;
-  // 目录名含 src 标记哈希：src 变化即换新沙盒目录，绝不删除活动/刚用过的沙盒——
-  // Windows 下删刚写过的树会撞杀毒扫描锁（ENOTEMPTY/EPERM，实测重试也扛不过分钟级窗口）；
-  // 旧版本目录在新沙盒建好后惰性清扫，锁着就留到下一轮。
-  const srcSource = path.join(e.godotProject, 'src');
-  const marker = treeMarker(srcSource);
-  const markerHash = crypto.createHash('sha1').update(marker).digest('hex').slice(0, 8);
-  const sandbox = path.join(GATE_PROJECTS_DIR, `${dirSlug(dir)}-${markerHash}`);
-  const cacheFile = path.join(sandbox, '.godot', 'global_script_class_cache.cfg');
-  if (!fs.existsSync(cacheFile)) {
-    fs.mkdirSync(path.join(sandbox, 'data'), { recursive: true });
-    fs.writeFileSync(path.join(sandbox, 'project.godot'), MINIMAL_PROJECT_GODOT);
-    fs.cpSync(srcSource, path.join(sandbox, 'src'), { recursive: true });
-    const exe = fs.existsSync(e.godotExe) ? e.godotExe : 'godot';
-    spawnSync(exe, ['--headless', '--path', sandbox, '--import'], { encoding: 'utf8', timeout: 300000 });
-    sweepStaleSandboxes(dirSlug(dir), sandbox);
-  }
-  for (const name of DATA_FILES) {
-    fs.copyFileSync(path.join(dir, name), path.join(sandbox, 'data', name));
-  }
-  return sandbox;
-}
-
-// 同一数据目录的旧版本沙盒：尽力删除，失败（被扫描锁）留到下次
-function sweepStaleSandboxes(slug, keepPath) {
-  try {
-    for (const entry of fs.readdirSync(GATE_PROJECTS_DIR)) {
-      if (!entry.startsWith(`${slug}-`)) continue;
-      const full = path.join(GATE_PROJECTS_DIR, entry);
-      if (samePath(full, keepPath)) continue;
-      try {
-        fs.rmSync(full, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-      } catch {
-        /* 被锁，留待下轮 */
-      }
-    }
-  } catch {
-    /* 目录不存在等，忽略 */
-  }
-}
-
 // gate 协议见 gate/config_gate.gd 头注释：stdout 单行 GATE_RESULT {json}，exit 0/2/3。
-function runGate(args, dataDir) {
+function runGate(args, workspaceId) {
   const e = env();
-  const project = gateProjectFor(dataDir);
+  workspace(workspaceId);
   const exe = fs.existsSync(e.godotExe) ? e.godotExe : 'godot';
-  const proc = spawnSync(
-    exe,
-    ['--headless', '--path', project, '--script', e.gateScript, '--', ...args],
-    { encoding: 'utf8', timeout: 60000 },
-  );
-  return parseGateOutput(proc);
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-config-gate-'));
+  const options = { encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, APPDATA: path.join(sandbox, 'user-data'), XDG_DATA_HOME: path.join(sandbox, 'user-data') } };
+  try {
+    fs.writeFileSync(path.join(sandbox, 'project.godot'), MINIMAL_PROJECT_GODOT + '\n[autoload]\nGameSession="*res://.gate_session.gd"\nDebugConsole="*res://.gate_console.gd"\n', 'utf8');
+    for (const [source, target] of [['session_stub.gd', '.gate_session.gd'], ['console_stub.gd', '.gate_console.gd']]) {
+      fs.copyFileSync(path.join(TOOL_ROOT, 'gate', source), path.join(sandbox, target));
+    }
+    assets.regularFile(e.godotProject, 'src/data/match_config.gd');
+    fs.cpSync(path.join(e.godotProject, 'src'), path.join(sandbox, 'src'), { recursive: true, filter: (file) => {
+      if (fs.lstatSync(file).isSymbolicLink()) throw new Error('可信校验源码不允许符号链接');
+      return true;
+    } });
+    fs.mkdirSync(path.join(sandbox, 'data'));
+    for (const name of DATA_FILES) {
+      const source = configPath(workspaceId, name);
+      assets.readJson(source);
+      fs.copyFileSync(source, path.join(sandbox, 'data', name));
+    }
+    const imported = spawnSync(exe, ['--headless', '--path', sandbox, '--import'], options);
+    if (imported.error || imported.status !== 0 || /SCRIPT ERROR|^ERROR:/m.test(`${imported.stdout}\n${imported.stderr}`)) {
+      return { ok: false, errors: [`Godot 配置隔离导入失败：${String(imported.error?.message || imported.stderr || imported.stdout).slice(0, 2500)}`] };
+    }
+    return parseGateOutput(spawnSync(exe, ['--headless', '--path', sandbox, '--script', e.gateScript, '--', ...args], options));
+  } finally { fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 }); }
 }
 
 function parseGateOutput(proc) {
+  if (proc.error || proc.status !== 0 || /SCRIPT ERROR|^ERROR:/m.test(`${proc.stdout || ''}\n${proc.stderr || ''}`)) {
+    return { ok: false, errors: [`Godot 校验失败（exit=${proc.status}）：${String(proc.error?.message || proc.stderr || proc.stdout || '').slice(0, 2000)}`] };
+  }
   const line = String(proc.stdout || '').split(/\r?\n/).find((l) => l.startsWith(GATE_RESULT_PREFIX));
   if (!line) {
     const stderr = String(proc.stderr || '').slice(0, 400);
@@ -266,7 +270,7 @@ function mapEnv() {
 }
 
 function resolveMapsDir(explicit) {
-  return explicit && String(explicit).trim().length > 0 ? path.resolve(String(explicit).trim()) : mapEnv().mapsDir;
+  return workspace(explicit).root;
 }
 
 /** 地图文件名安全校验：与 map-edit-ops sanitizeFileBase 同口径（保留中文/CJK，
@@ -286,7 +290,7 @@ function listMaps(mapsDir) {
     .readdirSync(dir)
     .filter((name) => name.endsWith('.json') && !name.endsWith('.bak') && !name.endsWith('.tmp') && !name.startsWith('.'))
     .map((name) => {
-      const full = path.join(dir, name);
+      const full = workspaceService.file(mapsDir, name, { mustExist: true });
       return { name, path: full, mtimeMs: fs.statSync(full).mtimeMs };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -296,7 +300,9 @@ function listMaps(mapsDir) {
 function readMap(name, mapsDir) {
   const file = safeMapName(name);
   if (!file) return { ok: false, error: `非法地图文件名：${name}` };
-  const full = path.join(resolveMapsDir(mapsDir), file);
+  workspace(mapsDir);
+  const full = workspaceService.file(mapsDir, file, { mustExist: true });
+  assets.readJson(full);
   const text = fs.readFileSync(full, 'utf8');
   return {
     ok: true,
@@ -310,60 +316,116 @@ function readMap(name, mapsDir) {
   };
 }
 
-function runMapGate(candidatePath) {
+function runMapGate(candidatePath, workspaceId) {
   const m = mapEnv();
   const e = env();
   const exe = fs.existsSync(e.godotExe) ? e.godotExe : 'godot';
-  const proc = spawnSync(
-    exe,
-    ['--headless', '--path', m.mapProject, '--script', m.mapGateScript, '--', 'check', '--candidate', candidatePath],
-    { encoding: 'utf8', timeout: 120000 },
-  );
-  return parseGateOutput(proc);
+  const ws = workspace(workspaceId);
+  const sandbox = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pixel-map-gate-'));
+  const gateOptions = { encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, APPDATA: path.join(sandbox, 'user-data'), XDG_DATA_HOME: path.join(sandbox, 'user-data') } };
+  try {
+    fs.writeFileSync(path.join(sandbox, 'project.godot'), MINIMAL_PROJECT_GODOT + '\n[autoload]\nGameSession="*res://.gate_session.gd"\nDebugConsole="*res://.gate_console.gd"\n', 'utf8');
+    fs.copyFileSync(path.join(TOOL_ROOT, 'gate', 'session_stub.gd'), path.join(sandbox, '.gate_session.gd'));
+    fs.copyFileSync(path.join(TOOL_ROOT, 'gate', 'console_stub.gd'), path.join(sandbox, '.gate_console.gd'));
+    // The gate always runs on a copy. It must never create candidates/import caches in the game project.
+    for (const directory of ['src', 'data']) {
+      // Executable code is always the tool's trusted game implementation, never an imported package.
+      const source = path.join(directory === 'src' ? e.godotProject : ws.projectRoot, directory);
+      if (fs.existsSync(source)) fs.cpSync(source, path.join(sandbox, directory), {
+        recursive: true,
+        filter: (file) => {
+          if (['maps', '.godot', '.git'].includes(path.basename(file)) || file.endsWith('.import')) return false;
+          const stat = fs.lstatSync(file);
+          if (stat.isSymbolicLink()) throw new Error('校验依赖不允许符号链接');
+          return directory === 'src' || stat.isDirectory() || /\.(json|png)$/i.test(file);
+        },
+      });
+    }
+    const background = assets.backgroundInfo(workspaceService, workspaceId, assets.readJson(candidatePath), imageDecoder, false);
+    for (const image of Object.values(background.images)) {
+      if (image.error) continue;
+      const target = path.join(sandbox, image.path.slice(6));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(assets.resourceFile(workspaceService, workspaceId, image.path, '.png'), target);
+    }
+    const mount = path.join(sandbox, ws.resPrefix.slice(6));
+    fs.mkdirSync(path.dirname(mount), { recursive: true });
+    fs.mkdirSync(mount, { recursive: true });
+    const copyData = (folder, relative = '') => {
+      for (const item of fs.readdirSync(folder, { withFileTypes: true })) {
+        const rel = relative ? `${relative}/${item.name}` : item.name;
+        const source = workspaceService.file(workspaceId, rel, { mustExist: true });
+        if (item.isDirectory()) copyData(source, rel);
+        else if (item.isFile() && /\.(json|png)$/i.test(item.name)) {
+          const target = path.join(mount, rel);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.copyFileSync(source, target);
+        }
+      }
+    };
+    copyData(ws.root);
+    const imported = spawnSync(exe, ['--headless', '--path', sandbox, '--import'], gateOptions);
+    if (imported.error || imported.status !== 0 || /SCRIPT ERROR|^ERROR:/m.test(`${imported.stdout}\n${imported.stderr}`)) {
+      return { ok: false, errors: [`Godot staging 导入失败：${String(imported.error?.message || imported.stderr || imported.stdout).slice(0, 2500)}`] };
+    }
+    const proc = spawnSync(exe,
+      ['--headless', '--path', sandbox, '--script', m.mapGateScript, '--', 'check', '--candidate', candidatePath],
+      gateOptions);
+    return parseGateOutput(proc);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 });
+  }
 }
 
 /** 地图文件全路径（供 shell 打开；不校验存在性） */
-function mapFilePath(name) {
+function mapFilePath(name, workspaceId) {
   const file = safeMapName(name);
   if (!file) return null;
-  return path.join(resolveMapsDir(null), file);
+  workspace(workspaceId);
+  return workspaceService.file(workspaceId, file, { mustExist: true });
 }
 
 /** 读游戏侧 UI 图标 SVG 文本（R19：box_mode 与游戏同款标志，主进程文件系统访问） */
-function iconText(name) {
+function iconText(name, workspaceId) {
   const safe = /^[A-Za-z0-9_-]+$/.test(String(name)) ? String(name) : null;
   if (!safe) return { ok: false, error: `bad icon name: ${name}` };
-  const file = path.join(mapEnv().mapProject, 'assets', 'ui', 'icons', `${safe}.svg`);
+  const file = assets.regularFile(workspace(workspaceId).projectRoot, `assets/ui/icons/${safe}.svg`);
   if (!fs.existsSync(file)) return { ok: false, error: `icon missing: ${file}` };
   return { ok: true, text: fs.readFileSync(file, 'utf8') };
 }
 
 /** 文件重命名（R17）：真·改名文件（含 .bak 跟随）；不改内容不过 gate（字节不变语义不变） */
-function renameMap({ from, to }) {
+function renameMap({ from, to, workspaceId, baseHash }) {
   const oldFile = safeMapName(from);
   const newFile = safeMapName(to);
   if (!oldFile || !newFile) {
     return { ok: false, code: 'usage', errors: [`非法地图文件名：${from} → ${to}`] };
   }
-  const dir = resolveMapsDir(null);
-  const oldFull = path.join(dir, oldFile);
-  const newFull = path.join(dir, newFile);
+  workspace(workspaceId);
+  const oldFull = workspaceService.file(workspaceId, oldFile, { mustExist: true });
+  const newFull = workspaceService.file(workspaceId, newFile);
   if (!fs.existsSync(oldFull)) {
     return { ok: false, code: 'usage', errors: [`地图不存在：${oldFile}`] };
   }
   if (fs.existsSync(newFull)) {
     return { ok: false, code: 'usage', errors: [`目标名称已存在：${newFile}`] };
   }
+  if (baseHash && sha256(fs.readFileSync(oldFull, 'utf8')) !== baseHash) return { ok: false, code: 'conflict', errors: ['地图被外部修改，请重新加载后改名'] };
+  const oldBackup = workspaceService.file(workspaceId, `${oldFile}.bak`);
+  const newBackup = workspaceService.file(workspaceId, `${newFile}.bak`);
+  if (fs.existsSync(newBackup)) return { ok: false, code: 'usage', errors: ['目标备份文件已存在'] };
   fs.renameSync(oldFull, newFull);
-  if (fs.existsSync(`${oldFull}.bak`)) fs.renameSync(`${oldFull}.bak`, `${newFull}.bak`);
+  try { if (fs.existsSync(oldBackup)) fs.renameSync(oldBackup, newBackup); }
+  catch (error) { fs.renameSync(newFull, oldFull); throw error; }
   return { ok: true, name: newFile, path: newFull };
 }
 
-function saveMap({ name, data, baseHash, mapsDir, expectCreate }) {
-  const dir = resolveMapsDir(mapsDir);
+function saveMap({ name, data, baseHash, workspaceId, expectCreate }) {
+  workspace(workspaceId);
   const file = safeMapName(name);
   if (!file) return { ok: false, code: 'usage', errors: [`非法地图文件名：${name}（仅字母数字_-. ）`] };
-  const full = path.join(dir, file);
+  const full = workspaceService.file(workspaceId, file);
   const exists = fs.existsSync(full);
   if (exists && expectCreate) {
     return { ok: false, code: 'usage', errors: [`地图已存在：${file}（改名请改文档 name 字段后另存）`] };
@@ -382,26 +444,42 @@ function saveMap({ name, data, baseHash, mapsDir, expectCreate }) {
     }
   }
   const text = serialize(data);
-  fs.mkdirSync(GATE_CANDIDATE_DIR, { recursive: true });
-  const candidate = path.join(GATE_CANDIDATE_DIR, 'candidate-map.json');
+  if (Buffer.byteLength(text, 'utf8') > assets.MAX_BYTES) return { ok: false, code: 'usage', errors: ['地图超过 32 MiB 上限'] };
+  const resources = assets.backgroundInfo(workspaceService, workspaceId, data, imageDecoder, false);
+  if (!resources.ok) return { ok: false, code: 'assets', errors: resources.errors };
+  const candidateDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pixel-map-candidate-'));
+  const candidate = path.join(candidateDir, `${crypto.randomUUID()}.json`);
   fs.writeFileSync(candidate, text, 'utf8');
-  const gate = runMapGate(candidate);
+  let gate;
+  try { gate = runMapGate(candidate, workspaceId); }
+  finally { fs.rmSync(candidateDir, { recursive: true, force: true }); }
   if (!gate.ok) {
     return { ok: false, code: 'gate', errors: gate.errors };
   }
-  if (exists) fs.copyFileSync(full, `${full}.bak`);
-  const tmp = `${full}.tmp`;
-  fs.writeFileSync(tmp, text, 'utf8');
-  fs.renameSync(tmp, full);
+  workspaceService.file(workspaceId, file);
+  if (exists !== fs.existsSync(full) || (exists && sha256(fs.readFileSync(full, 'utf8')) !== baseHash)) {
+    return { ok: false, code: 'conflict', errors: ['校验期间文件被外部修改，未保存，请重新加载'] };
+  }
+  if (exists) {
+    const backup = workspaceService.file(workspaceId, `${file}.bak`);
+    if (fs.existsSync(backup) && !fs.statSync(backup).isFile()) throw new Error('地图 .bak 目标不是普通文件');
+    fs.copyFileSync(full, backup);
+  }
+  const tmp = `${full}.${crypto.randomUUID()}.tmp`;
+  try { fs.writeFileSync(tmp, text, { encoding: 'utf8', flag: 'wx' }); fs.renameSync(tmp, full); }
+  finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
   return { ok: true, written: true, hash: sha256(text), errors: [], name: file, path: full };
 }
 
 module.exports = {
+  configureWorkspace,
+  env,
   FILES,
   isKind,
   meta,
   readKind,
   readLabels,
+  readEditorTemplates,
   saveKind,
   runGate,
   serialize,

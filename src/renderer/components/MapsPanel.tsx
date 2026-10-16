@@ -22,11 +22,14 @@ import {
   type ToolState,
 } from "../map-edit-ops";
 import { validateMapTree } from "../light-validation";
-import type { ConfigFile, Entity, MapsListResult, MapSaveResult } from "../types";
+import type { BackgroundInfo, ConfigFile, Entity, MapsListResult, MapSaveResult, WorkspaceSession } from "../types";
+import { backgroundForView, withBackgroundSlot, withoutBackground, type BackgroundSlot, type BackgroundView } from "../background-model";
+import { Braces, Eraser, FilePlus2, Flower2, FolderInput, Landmark, MapPin, MousePointer2, Move, Paintbrush, Redo2, RotateCcw, Save, ScanLine, Shapes, SquareDashed, Trash2, Trees, Undo2 } from "lucide-react";
 import type { LabelsData } from "../labels";
 import Dropdown from "./Dropdown";
 import FieldTree from "./FieldTree";
 import MapCanvas from "./MapCanvas";
+import BackgroundInspector from "./BackgroundInspector";
 
 // 地图面板（T-164 R7/R8/R9）：dev-2d data/maps/*.json 编辑——左列表（含新建）/中字段树/
 // 右 2D 画布（视口化：滚轮缩放/拖动平移；直编：地形笔刷/擦除、box_mode 画框、建筑/树/
@@ -49,6 +52,7 @@ export interface MapsPanelHandle {
   /** 关闭前保存询问用：保存全部脏地图，全部成功才返回 true */
   saveAll(): Promise<boolean>;
   isAnyDirty(): boolean;
+  isBusy(): boolean;
   /** 撤销/重做当前激活地图（App 全局快捷键路由） */
   undo(): void;
   redo(): void;
@@ -59,9 +63,11 @@ export interface MapsPanelHandle {
 }
 
 interface Props {
+  workspace: WorkspaceSession;
   labelsData: LabelsData;
   handleRef?: Ref<MapsPanelHandle>;
   onDirtyChange?(dirtyCount: number): void;
+  onBusyChange?(busy: boolean): void;
   unitsCache?: Entity[] | null;
   /** 地图页当前激活（参数热键只在激活时接管数字键/字母 B） */
   active?: boolean;
@@ -78,6 +84,7 @@ type SaveState =
 /** 语义脏判定。R31：读 state.original（读取/保存时已解析好），不再每次 JSON.parse(state.text)。 */
 function dirtyOf(state?: MapDocState | null): boolean {
   if (!state) return false;
+  if (state.isNew) return true;
   try {
     return canonicalJson(state.doc) !== canonicalJson(state.original);
   } catch {
@@ -152,13 +159,18 @@ const TOOL_HINTS: Record<ToolState["tool"], string> = {
   "move-shape": "移动·地形图形：按住地形补丁或 box 范围拖动整体平移（钳图界）。补丁优先于 box。",
   "move-render": "移动·渲染内容：按住 decor 树拖动到新格。水等地面贴图属性走 render 配置文件不在画布移动。",
 };
+const TOOL_ICONS = { none: MousePointer2, terrain: Paintbrush, erase: Eraser, box: SquareDashed, building: Landmark, tree: Trees, spawn: MapPin, delete: Trash2, "move-unit": Move, "move-shape": Shapes, "move-render": Flower2 };
 
-export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsCache = null, active = false, buildingsVersion = 0 }: Props) {
+export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyChange, onBusyChange, unitsCache = null, active = false, buildingsVersion = 0 }: Props) {
   const [list, setList] = useState<MapsListResult | null>(null);
   const [docs, setDocs] = useState<Record<string, MapDocState>>({}); // key: 文件名或 "@new/<name>"
   const [activeKey, setActiveKey] = useState<string>("");
   const [saveState, setSaveState] = useState<SaveState>({ tone: "idle" });
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusyState] = useState(false);
+  const busyRef = useRef(false);
+  const setBusy = useCallback((next: boolean) => { busyRef.current = next; setBusyState(next); }, []);
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  useEffect(() => () => { onBusyChange?.(false); }, [onBusyChange]);
   const newCounter = useRef(0);
   const historyRef = useRef(new DocHistory<ConfigFile>());
   const [historyTick, setHistoryTick] = useState(0); // 撤销/重做后驱动按钮可用态刷新
@@ -176,11 +188,16 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   const [renameModal, setRenameModal] = useState<{ from: string; value: string; error?: string } | null>(null);
   // R22：选中对象（预览点按已放置对象→选中并切对应模式；拖动移动）
   const [selectedObject, setSelectedObject] = useState<{ kind: "building" | "spawn"; index: number } | null>(null);
+  const [backgroundInfo, setBackgroundInfo] = useState<BackgroundInfo | null>(null);
+  const [backgroundView, setBackgroundView] = useState<BackgroundView>("topdown");
+  const [imageModeRequested, setImageModeRequested] = useState(false);
+  const [backgroundRevision, setBackgroundRevision] = useState(0);
+  const [externalChanges, setExternalChanges] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     api
-      .read("buildings", null)
+      .readWorkspaceConfig("buildings")
       .then((result) => {
         if (!cancelled && result.ok && result.data) {
           // 占地三级解析：配置已给（实时）→ 用户裁定表 → sim 3×3 回退
@@ -198,7 +215,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
     return () => {
       cancelled = true;
     };
-  }, [buildingsVersion]);
+  }, [buildingsVersion, workspace.id, workspace.generation]);
 
   // 当前选中建筑的放置占地 → 工具态（画布幽灵与放置同源）
   useEffect(() => {
@@ -213,6 +230,28 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   const load = activeKey ? docs[activeKey] ?? null : null;
   const dirty = dirtyOf(load);
   const dirtyCount = useMemo(() => Object.values(docs).filter(dirtyOf).length, [docs]);
+  const backgroundKey = JSON.stringify([load?.doc.background, load?.doc.renderer]);
+  useEffect(() => {
+    let cancelled = false;
+    setBackgroundInfo(null);
+    if (load) api.backgroundInfo(load.doc).then((info) => { if (!cancelled) setBackgroundInfo(info); }).catch((error: unknown) => {
+      if (!cancelled) setBackgroundInfo({ ok: false, source: "none", background: {}, images: {}, errors: [String(error)] });
+    });
+    return () => { cancelled = true; };
+  }, [activeKey, backgroundKey, backgroundRevision, workspace.id, workspace.generation]);
+  useEffect(() => {
+    setSelectedObject(null);
+    setCtxMenu(null);
+    setImageModeRequested(false);
+    setBackgroundView("topdown");
+  }, [activeKey]);
+  const ownBackground = load?.doc.background;
+  const hasOwnBackground = ownBackground != null && (typeof ownBackground !== "object" || Array.isArray(ownBackground) || Object.keys(ownBackground).length > 0);
+  const wholeImageMode = imageModeRequested || hasOwnBackground || (backgroundInfo != null && backgroundInfo.source !== "none");
+  const previewImage = backgroundForView(backgroundInfo, backgroundView);
+  useEffect(() => {
+    if (wholeImageMode) setToolState((prev) => prev.tool === "terrain" || prev.tool === "erase" ? { ...prev, tool: "box" } : prev);
+  }, [wholeImageMode]);
 
   useEffect(() => {
     onDirtyChange?.(dirtyCount);
@@ -228,6 +267,28 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
     void refreshList();
   }, [refreshList]);
 
+  const refreshWorkspace = useCallback(async () => {
+    if (busy) return;
+    try {
+      setBackgroundRevision((value) => value + 1);
+      await refreshList();
+      const opened = Object.values(docs).filter((state) => !state.isNew);
+      const changed = await Promise.all(opened.map(async (state) => {
+        try {
+          const result = await api.readMap(state.name);
+          return !result.ok || result.hash !== state.hash ? state.name : null;
+        } catch { return state.name; }
+      }));
+      setExternalChanges(changed.filter((name): name is string => name !== null));
+    } catch (error) { setSaveState({ tone: "rejected", code: "read", errors: [String(error)] }); }
+  }, [busy, docs, refreshList]);
+
+  useEffect(() => {
+    const onFocus = () => { void refreshWorkspace(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshWorkspace]);
+
   const openMap = useCallback(
     async (name: string) => {
       if (docs[name]) {
@@ -236,17 +297,19 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
       }
       setBusy(true);
       setSaveState({ tone: "idle" });
-      const result = await api.readMap(name);
-      if (!result.ok || !result.data || !result.text || !result.hash || !result.path) {
-        setSaveState({ tone: "rejected", code: "read", errors: [result.error ?? `读取失败：${name}`] });
-      } else {
-        setDocs((prev) => ({
-          ...prev,
-          [name]: { name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
-        }));
-        setActiveKey(name);
-      }
-      setBusy(false);
+      try {
+        const result = await api.readMap(name);
+        if (!result.ok || !result.data || !result.text || !result.hash || !result.path) {
+          setSaveState({ tone: "rejected", code: "read", errors: [result.error ?? `读取失败：${name}`] });
+        } else {
+          setDocs((prev) => ({
+            ...prev,
+            [name]: { name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
+          }));
+          setActiveKey(name);
+        }
+      } catch (error) { setSaveState({ tone: "rejected", code: "read", errors: [String(error)] }); }
+      finally { setBusy(false); }
     },
     [docs],
   );
@@ -286,11 +349,11 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
 
   const updateDoc = useCallback(
     (next: Entity) => {
-      if (!load) return;
+      if (!load || busyRef.current) return;
       historyRef.current.commit(activeKey, load.doc, "field");
       setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc: next as ConfigFile } }));
     },
-    [load, activeKey],
+    [load, activeKey, busy],
   );
 
   // —— R8 画布直编：语义回调 → map-edit-ops 纯函数变换 doc（字段树同帧可见） ——
@@ -303,41 +366,107 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
     [load, activeKey],
   );
 
+  const importBackground = useCallback(async (slot: BackgroundSlot) => {
+    if (!load || busyRef.current) return;
+    const key = activeKey;
+    setBusy(true);
+    try {
+      const result = await api.importImage({ mapId: load.isNew ? fileNameFor(load.doc.name, "new_map") : load.name, view: slot });
+      if (!result.ok || !result.path) {
+        if (result.error) setSaveState({ tone: "rejected", code: "import", errors: [result.error] });
+        return;
+      }
+      const base = backgroundInfo?.source === "renderer" ? { ...load.doc, background: { ...backgroundInfo.background } } : load.doc;
+      const next = withBackgroundSlot(base, slot, result.path);
+      historyRef.current.commit(key, load.doc, "import-background", 0);
+      setDocs((prev) => ({ ...prev, [key]: { ...load, doc: next } }));
+      setImageModeRequested(false);
+      setBackgroundView(slot === "tilt" ? "tilt" : "topdown");
+      setSaveState({ tone: "idle" });
+    } catch (error) {
+      setSaveState({ tone: "rejected", code: "import", errors: [String(error)] });
+    } finally { setBusy(false); }
+  }, [load, activeKey, busy, backgroundInfo]);
+
+  const importMap = useCallback(async () => {
+    if (busyRef.current) return;
+    setBusy(true);
+    try {
+      const result = await api.importMap();
+      if (result.ok && result.name) {
+        await refreshList();
+        await openMap(result.name);
+      } else if (result.errors?.length) setSaveState({ tone: "rejected", code: "import", errors: result.errors });
+    } catch (error) {
+      setSaveState({ tone: "rejected", code: "import", errors: [String(error)] });
+    } finally { setBusy(false); }
+  }, [busy, refreshList, openMap]);
+
+  const removeBackground = useCallback(() => {
+    if (!load) return;
+    if (!window.confirm("移除本地图的 background 声明？渲染配置若带有整图背景，仍会继续生效。")) return;
+    applyDoc(withoutBackground(load.doc), "remove-background");
+    setImageModeRequested(false);
+  }, [load, applyDoc]);
+
+  const switchGroundMode = useCallback(async (imageMode: boolean) => {
+    if (imageMode || !load) { setImageModeRequested(imageMode); return; }
+    if (backgroundInfo?.source === "none" && !Object.prototype.hasOwnProperty.call(load.doc, "background")) { setImageModeRequested(false); return; }
+    setBusy(true);
+    try {
+      const candidate = withoutBackground(load.doc);
+      const fallback = await api.backgroundInfo(candidate);
+      const removesRenderer = fallback.source === "renderer";
+      if (!window.confirm(removesRenderer ? "切换为瓦片模式将移除本地图 background 声明和提供整图的 renderer 引用。已导入的图片文件会保留。确认切换？" : "切换为瓦片模式将移除本地图 background 声明。已导入的图片文件会保留。确认切换？")) return;
+      if (removesRenderer) delete candidate.renderer;
+      applyDoc(candidate, "switch-tile-mode");
+      setImageModeRequested(false);
+      setBackgroundView("topdown");
+    } catch (error) {
+      setSaveState({ tone: "rejected", code: "background", errors: [String(error)] });
+    } finally { setBusy(false); }
+  }, [load, backgroundInfo, applyDoc]);
+
   /** 撤销(-1)/重做(+1)：换 doc 并驱动按钮态刷新 */
   const undoRedo = useCallback(
     (dir: -1 | 1) => {
-      if (!load) return;
+      if (!load || busyRef.current) return;
       const next = dir < 0 ? historyRef.current.undoFor(activeKey, load.doc) : historyRef.current.redoFor(activeKey, load.doc);
       if (next === null) return;
       setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc: next } }));
       setHistoryTick((tick) => tick + 1);
     },
-    [load, activeKey],
+    [load, activeKey, busy],
   );
   void historyTick; // 仅驱动重渲染（canUndo/canRedo 即时读历史栈）
 
   /** 丢弃未保存编辑重读当前地图（脏则确认） */
   const reloadActive = useCallback(async () => {
-    if (!load) return;
+    if (!load || busyRef.current) return;
     if (dirtyOf(load) && !window.confirm("当前地图有未保存修改，重新加载将丢弃，确认？")) return;
     if (!load.isNew) {
-      const result = await api.readMap(load.name);
-      if (result.ok && result.data && result.text && result.hash && result.path) {
-        historyRef.current.clear(activeKey);
-        setDocs((prev) => ({
-          ...prev,
-          [load.name]: { name: load.name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
-        }));
-        setActiveKey(load.name);
-        setSaveState({ tone: "idle" });
-        return;
-      }
-      setSaveState({ tone: "rejected", code: "read", errors: [result.error ?? `重新读取失败：${load.name}`] });
+      setBusy(true);
+      try {
+        const result = await api.readMap(load.name);
+        if (result.ok && result.data && result.text && result.hash && result.path) {
+          historyRef.current.clear(activeKey);
+          setDocs((prev) => ({
+            ...prev,
+            [load.name]: { name: load.name, doc: result.data!, text: result.text!, hash: result.hash!, path: result.path!, isNew: false, original: result.data! },
+          }));
+          setActiveKey(load.name);
+          setExternalChanges((prev) => prev.filter((name) => name !== load.name));
+          setSaveState({ tone: "idle" });
+          return;
+        }
+        setSaveState({ tone: "rejected", code: "read", errors: [result.error ?? `重新读取失败：${load.name}`] });
+      } catch (error) { setSaveState({ tone: "rejected", code: "read", errors: [String(error)] }); }
+      finally { setBusy(false); }
       return;
     }
     // 新建未落盘地图：无磁盘源，等效撤销全部
     setSaveState({ tone: "rejected", code: "usage", errors: ["新建地图尚未保存，无磁盘版本可重载——可用 Ctrl+Z 逐步撤销"] });
-  }, [load]);
+  }, [load, activeKey, setBusy]);
 
   const onTerrainRect = useCallback(
     (rect: { x: number; y: number; w: number; h: number }) => {
@@ -561,27 +690,39 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   /** R17：执行文件重命名（含 .bak 跟随；已打开副本换键保留编辑态） */
   const doRename = useCallback(
     async (from: string, to: string) => {
-      const result = await api.renameMap({ from, to });
-      if (!result.ok) {
-        setRenameModal((prev) => (prev ? { ...prev, error: (result.errors ?? ["重命名失败"])[0] } : prev));
-        return;
-      }
-      const newName = result.name ?? to;
-      setRenameModal(null);
-      setDocs((prev) => {
-        const next = { ...prev };
-        const open = next[from];
-        if (open) {
-          delete next[from];
-          next[newName] = { ...open, name: newName, path: result.path ?? open.path };
+      if (busyRef.current) return;
+      setBusy(true);
+      try {
+        let baseHash = docs[from]?.hash;
+        if (!baseHash) {
+          const read = await api.readMap(from);
+          if (!read.ok || !read.hash) throw new Error(read.error ?? "重命名前读取地图失败");
+          baseHash = read.hash;
         }
-        return next;
-      });
-      setActiveKey((key) => (key === from ? newName : key));
-      historyRef.current.clear(from);
-      await refreshList();
+        const result = await api.renameMap({ from, to, baseHash });
+        if (!result.ok) throw new Error((result.errors ?? ["重命名失败"])[0]);
+        const newName = result.name ?? to;
+        setRenameModal(null);
+        setDocs((prev) => {
+          const next = { ...prev };
+          const open = next[from];
+          if (open) {
+            delete next[from];
+            next[newName] = { ...open, name: newName, path: result.path ?? open.path };
+          }
+          return next;
+        });
+        setActiveKey((key) => (key === from ? newName : key));
+        setExternalChanges((prev) => prev.filter((name) => name !== from));
+        historyRef.current.clear(from);
+        await refreshList();
+      } catch (error) {
+        setRenameModal((prev) => (prev ? { ...prev, error: String(error) } : prev));
+      } finally {
+        setBusy(false);
+      }
     },
-    [refreshList],
+    [docs, refreshList, setBusy],
   );
 
   // —— R14/R20 右键调参（建筑 + 出生点）：菜单 → 确保字段存在 → 展开 JSON 抽屉 → 定位 ——
@@ -682,6 +823,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
 
   const saveDoc = useCallback(
     async (key: string): Promise<boolean> => {
+      if (busyRef.current) return false;
       const state = docs[key];
       if (!state || !dirtyOf(state)) return true;
       setSaveState({ tone: "saving" });
@@ -704,6 +846,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             return next;
           });
           setActiveKey(targetName);
+          setExternalChanges((prev) => prev.filter((name) => name !== targetName));
           setSaveState({
             tone: "ok",
             written: Boolean(result.written),
@@ -714,6 +857,9 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
         }
         setSaveState({ tone: "rejected", code: result.code ?? "error", errors: result.errors ?? ["未知错误"] });
         return false;
+      } catch (error) {
+        setSaveState({ tone: "rejected", code: "io", errors: [String(error)] });
+        return false;
       } finally {
         setBusy(false);
       }
@@ -722,7 +868,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   );
 
   const save = useCallback(() => {
-    if (!load || busy) return;
+    if (!load || busyRef.current) return;
     void saveDoc(activeKey);
   }, [load, busy, activeKey, saveDoc]);
 
@@ -730,6 +876,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
     handleRef,
     () => ({
       async saveAll(): Promise<boolean> {
+        if (busyRef.current) return false;
         for (const key of Object.keys(docs)) {
           if (dirtyOf(docs[key])) {
             const ok = await saveDoc(key);
@@ -741,6 +888,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
       isAnyDirty(): boolean {
         return Object.values(docs).some(dirtyOf);
       },
+      isBusy(): boolean { return busyRef.current; },
       undo(): void {
         undoRedo(-1);
       },
@@ -810,6 +958,13 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
   // 面板常驻挂载，自带 window 监听会在配置页误触发，R9 收口）。
 
   const lightErrors = useMemo(() => (load ? validateMapTree(load.doc as Entity) : new Map<string, string>()), [load]);
+  const invalidCanvasFields = useMemo(() => {
+    if (!load) return [];
+    return ["buildings", "spawns", "box_mode", "terrain_patches", "decor"].filter((key) => {
+      const value = load.doc[key];
+      return value !== undefined && (!Array.isArray(value) || value.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)));
+    });
+  }, [load]);
 
   const original = useMemo(() => {
     if (!load) return {} as Entity;
@@ -823,28 +978,29 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
     <div className="maps-panel">
       <div className="maps-toolbar">
         <button className="btn slim" data-testid="map-new-btn" onClick={createMap} disabled={busy}>
-          ＋ 新建地图
+          <FilePlus2 size={14} /> 新建
         </button>
-        <button className="btn slim" data-testid="map-reload-btn" onClick={() => void refreshList()} disabled={busy}>
-          刷新列表
+        <button className="btn slim" data-testid="map-import-btn" onClick={() => void importMap()} disabled={busy}><FolderInput size={14} /> 导入地图</button>
+        <button className="btn slim" data-testid="map-reload-btn" title="刷新地图列表、图片和外部修改状态" onClick={() => void refreshWorkspace()} disabled={busy}>
+          <RotateCcw size={14} /> 刷新
         </button>
         <button
           className="btn slim"
           data-testid="map-undo-btn"
           onClick={() => undoRedo(-1)}
-          disabled={!load || !historyRef.current.canUndo(activeKey)}
+          disabled={busy || !load || !historyRef.current.canUndo(activeKey)}
           title="撤销（Ctrl+Z）——画布操作逐步、字段树输入合并"
         >
-          ↶ 撤销
+          <Undo2 size={14} />
         </button>
         <button
           className="btn slim"
           data-testid="map-redo-btn"
           onClick={() => undoRedo(1)}
-          disabled={!load || !historyRef.current.canRedo(activeKey)}
+          disabled={busy || !load || !historyRef.current.canRedo(activeKey)}
           title="重做（Ctrl+Y / Ctrl+Shift+Z）"
         >
-          ↷ 重做
+          <Redo2 size={14} />
         </button>
         <button
           className="btn slim"
@@ -853,7 +1009,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
           disabled={busy || !load}
           title="丢弃未保存修改，从磁盘重读当前地图"
         >
-          重新加载
+          <RotateCcw size={14} /> 重载
         </button>
         <span className="tool-group">
           {(
@@ -877,9 +1033,12 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
               <button
                 className={`btn slim tool${toolState.tool === value ? " active" : ""}`}
                 data-testid={`map-tool-${value}`}
+                title={label}
+                aria-label={label}
+                disabled={busy || ((backgroundView === "tilt" || invalidCanvasFields.length > 0) && value !== "none") || (wholeImageMode && ["terrain", "erase"].includes(value))}
                 onClick={() => setToolState((prev) => ({ ...prev, tool: value }))}
               >
-                {label}
+                {(() => { const Icon = TOOL_ICONS[value]; return <Icon size={16} />; })()}
               </button>
             </Fragment>
           ))}
@@ -913,7 +1072,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             />
           </>
         ) : null}
-        <span className="chip" data-testid="map-count-chip" title={list?.mapsDir ?? ""}>
+        <span className="chip map-count-chip" data-testid="map-count-chip" title={list?.mapsDir ?? ""}>
           {list?.ok ? (
             <>
               <b>{list.maps?.length ?? 0}</b> 张
@@ -936,11 +1095,13 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
           onClick={save}
           disabled={busy || !load || !dirty}
         >
-          保存（过 Godot 门禁）
+          <Save size={14} /> 保存
         </button>
       </div>
 
       {saveState.tone === "saving" ? <div className="banner info">Godot 地图门禁校验中…</div> : null}
+      {externalChanges.length > 0 ? <div className="banner warn" data-testid="map-external-changes">磁盘地图已变化：{externalChanges.join("、")}。当前编辑副本已保留，保存时会核对文件版本。</div> : null}
+      {invalidCanvasFields.length > 0 ? <div className="banner error" data-testid="map-structure-errors">{invalidCanvasFields.join("、")}：须为对象数组。画布编辑已暂停，原始字段保留在 JSON 编辑器中。</div> : null}
       {saveState.tone === "ok" ? (
         <div className="banner ok" data-testid="map-save-ok">
           {saveState.written ? `已保存：${saveState.label}（旧文件备份为 .bak）` : "无改动，未写盘"}
@@ -959,11 +1120,13 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
 
       <div className="maps-body">
         <aside className="map-list" data-testid="map-list">
+          <div className="map-list-heading"><span>地图</span><span>{list?.maps?.length ?? 0}</span></div>
           {(list?.maps ?? []).map((meta) => (
             <button
               key={meta.name}
               className={`map-item${activeKey === meta.name ? " active" : ""}`}
               data-testid={`map-item-${meta.name.replace(/\./g, "-")}`}
+              disabled={busy}
               onClick={() => void openMap(meta.name)}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -981,6 +1144,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
                 key={key}
                 className={`map-item new${activeKey === key ? " active" : ""}`}
                 data-testid="map-item-new"
+                disabled={busy}
                 onClick={() => setActiveKey(key)}
               >
                 ＊ {String(state.doc.name ?? "新地图")}（未保存）
@@ -996,6 +1160,9 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
           <MapCanvas
             doc={(load?.doc as Entity) ?? null}
             tool={toolState}
+            backgroundUrl={previewImage?.dataUrl}
+            projection={backgroundView}
+            readOnly={backgroundView === "tilt" || busy || invalidCanvasFields.length > 0}
             onTerrainRect={onTerrainRect}
             onBoxAdd={onBoxAdd}
             onPlaceAt={onPlaceAt}
@@ -1011,10 +1178,10 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
                   className="quick-sq"
                   data-testid="map-border-btn"
                   onClick={onBorderBoxes}
-                  disabled={busy || !load}
+                  disabled={busy || !load || invalidCanvasFields.length > 0}
                   title="一键设置地图边界：四边边缘放一圈 禁通行+禁建 的 box_mode（覆盖语义，可 Ctrl+Z 撤销）"
                 >
-                  ▣
+                  <ScanLine size={17} />
                 </button>
                 <button
                   className="quick-sq"
@@ -1023,7 +1190,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
                   disabled={busy || !load || load.isNew}
                   title="一键取消编辑：丢弃当前地图全部未保存修改，回到上次保存（脏则确认）"
                 >
-                  ↺
+                  <RotateCcw size={17} />
                 </button>
               </>
             }
@@ -1035,16 +1202,7 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             title={jsonOpen ? "折叠 JSON 字段树（研发用）" : "展开 JSON 字段树（研发用——普通地图设计用画布工具即可）"}
             onClick={() => setJsonOpen((open) => !open)}
           >
-            <svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true">
-              <path
-                d="M6.1 1.5 5.4 1.5C4.1 1.5 3 2.6 3 3.9V5.6C3 6.2 2.6 6.6 2 6.9V9.1C2.6 9.4 3 9.8 3 10.4V12.1C3 13.4 4.1 14.5 5.4 14.5H6.1V13.1H5.4C4.9 13.1 4.4 12.6 4.4 12.1V10.4C4.4 9.7 4.1 9.1 3.6 8.7 4.1 8.3 4.4 7.7 4.4 7V3.9C4.4 3.4 4.9 2.9 5.4 2.9H6.1Z"
-                fill="currentColor"
-              />
-              <path
-                d="M9.9 1.5 10.6 1.5C11.9 1.5 13 2.6 13 3.9V5.6C13 6.2 13.4 6.6 14 6.9V9.1C13.4 9.4 13 9.8 13 10.4V12.1C13 13.4 11.9 14.5 10.6 14.5H9.9V13.1H10.6C11.1 13.1 11.6 12.6 11.6 12.1V10.4C11.6 9.7 11.9 9.1 12.4 8.7 11.9 8.3 11.6 7.7 11.6 7V3.9C11.6 3.4 11.1 2.9 10.6 2.9H9.9Z"
-                fill="currentColor"
-              />
-            </svg>
+            <Braces size={17} />
           </button>
           {jsonOpen ? (
             <div className="map-json-drawer" data-testid="map-json-drawer">
@@ -1286,6 +1444,17 @@ export default function MapsPanel({ labelsData, handleRef, onDirtyChange, unitsC
             </div>
           ) : null}
         </section>
+        <aside className="map-inspector" data-testid="map-inspector">
+          <div className="map-inspector-title">属性</div>
+          {load ? <BackgroundInspector doc={load.doc} info={backgroundInfo} view={backgroundView} busy={busy} imageMode={wholeImageMode} onMode={(imageMode) => void switchGroundMode(imageMode)} onView={setBackgroundView} onChange={updateDoc} onImport={(slot) => void importBackground(slot)} onRemove={removeBackground} /> : <div className="empty">未选择地图</div>}
+          {load && selectedObject ? (() => {
+            const key = selectedObject.kind === "building" ? "buildings" : "spawns";
+            const entries = load.doc[key];
+            const raw = Array.isArray(entries) ? entries[selectedObject.index] : null;
+            if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+            return <section className="map-inspector-section" data-testid="map-selected-inspector"><h3>{selectedObject.kind === "building" ? "选中建筑" : "选中出生点"}</h3>{Object.entries(raw).filter(([, value]) => typeof value === "number" || typeof value === "string").map(([field, value]) => <label className="map-field" key={field}><span>{field}</span><input className="cell" type={typeof value === "number" ? "number" : "text"} value={String(value)} disabled={busy || field === "key" || field === "kind"} onChange={(event) => { const next = [...entries as Entity[]]; next[selectedObject.index] = { ...raw, [field]: typeof value === "number" ? Number(event.target.value) : event.target.value }; updateDoc({ ...load.doc, [key]: next }); }} /></label>)}</section>;
+          })() : null}
+        </aside>
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import type { Entity, JsonValue } from "../types";
 import type { ToolState } from "../map-edit-ops";
 import { ppcOf, stepZoom, wheelDirection } from "../zoom-ladder";
 import { nextGrid, type GridCache } from "../terrain-grid";
+import { RotateCcw } from "lucide-react";
 
 // 地图画布（T-164 R7 预览 / R8 直编 / R9 视口化 / R10 性能与健壮性）。
 // —— 渲染管线（R10 修黑屏事故的 GPU 风暴嫌疑）：静态层（地形/网格/建筑/出生点/box 逐格
@@ -33,6 +34,9 @@ const TEAM_COLORS: Record<number, string> = { 0: "#8d8d96", 1: "#5abfef", 2: "#f
 interface Props {
   doc: Entity | null;
   tool: ToolState;
+  backgroundUrl?: string;
+  projection?: "topdown" | "tilt";
+  readOnly?: boolean;
   onTerrainRect?(rect: { x: number; y: number; w: number; h: number }): void;
   onBoxAdd?(x0: number, y0: number, x1: number, y1: number): void;
   onPlaceAt?(x: number, y: number): void;
@@ -75,7 +79,7 @@ function clampView(value: number, dim: number, visible: number): number {
   return Math.max(-8, Math.min(dim + 8 - Math.max(1, visible), value));
 }
 
-export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, onSelectObject, onMoveObject }: Props) {
+export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topdown", readOnly = false, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, onSelectObject, onMoveObject }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
@@ -83,6 +87,26 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
   const [viewport, setViewport] = useState<Viewport>({ ox: 0, oy: 0, zoom: 1 });
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [staticTick, setStaticTick] = useState(0);
+  const [backgroundImage, setBackgroundImage] = useState<{ src: string; image: HTMLImageElement } | null>(null);
+  const projectionY = projection === "tilt" ? 0.75 : 1;
+  const image = backgroundImage && backgroundImage.src === backgroundUrl ? backgroundImage.image : null;
+  useEffect(() => {
+    if (!backgroundUrl) return;
+    let cancelled = false;
+    const next = new Image();
+    next.onload = () => { if (!cancelled) setBackgroundImage({ src: backgroundUrl, image: next }); };
+    next.onerror = () => { if (!cancelled) setBackgroundImage(null); };
+    next.src = backgroundUrl;
+    return () => { cancelled = true; };
+  }, [backgroundUrl]);
+  useEffect(() => {
+    dragRef.current = null;
+    objectDragRef.current = null;
+    panRef.current = null;
+    setDragPreview(null);
+    setObjectGhost(null);
+    setHover(null);
+  }, [projection, readOnly]);
   // R31：DPR backing store——画布内部分辨率 = CSS 尺寸 × dpr，绘制路径统一 setTransform(dpr)
   // 缩放，故现有坐标计算（CSS 像素语义）一行不改；命中测试也仍走 CSS 像素，不受影响。
   const [dpr, setDpr] = useState(() => (typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
@@ -152,9 +176,13 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     if (!canvasReady) return;
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 40 && rect.height > 40) setSize({ w: Math.floor(rect.width), h: Math.floor(rect.height) });
+    const observer = new ResizeObserver(([entry]) => {
+      const rect = entry.contentRect;
+      if (rect.width > 40 && rect.height > 40) {
+        const w = Math.floor(rect.width);
+        const h = Math.floor(rect.height);
+        setSize((previous) => previous.w === w && previous.h === h ? previous : { w, h });
+      }
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -192,18 +220,20 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     const ctx = off.getContext("2d");
     if (!ctx) return;
     // 之后全部按 CSS 像素（size.w/size.h/ppc）绘制，由本变换映射到物理像素
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#14171d";
-    ctx.fillRect(0, 0, size.w, size.h);
+    ctx.setTransform(dpr, 0, 0, dpr * projectionY, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = "#171819";
+    ctx.fillRect(0, 0, size.w, size.h / projectionY);
 
     const sx = (cx: number) => (cx - viewport.ox) * ppc;
     const sy = (cy: number) => (cy - viewport.oy) * ppc;
     const cx0 = Math.max(0, Math.floor(viewport.ox));
     const cy0 = Math.max(0, Math.floor(viewport.oy));
     const cx1 = Math.min(mapW - 1, Math.ceil(viewport.ox + size.w / ppc));
-    const cy1 = Math.min(mapH - 1, Math.ceil(viewport.oy + size.h / ppc));
+    const cy1 = Math.min(mapH - 1, Math.ceil(viewport.oy + size.h / (ppc * projectionY)));
 
-    for (let cy = cy0; cy <= cy1; cy++) {
+    if (image) ctx.drawImage(image, sx(0), sy(0), mapW * ppc, mapH * ppc);
+    for (let cy = cy0; !image && cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
         ctx.fillStyle = TERRAIN_COLORS[terrainAt[cy * mapW + cx]] ?? "#c0392b";
         ctx.fillRect(Math.floor(sx(cx)), Math.floor(sy(cy)), Math.ceil(ppc) + 1, Math.ceil(ppc) + 1);
@@ -217,7 +247,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(Math.floor(sx(cx)) + 0.5, Math.max(0, sy(0)));
-      ctx.lineTo(Math.floor(sx(cx)) + 0.5, Math.min(size.h, sy(mapH)));
+      ctx.lineTo(Math.floor(sx(cx)) + 0.5, Math.min(size.h / projectionY, sy(mapH)));
       ctx.stroke();
     }
     for (let cy = cy0; cy <= cy1 + 1; cy++) {
@@ -393,7 +423,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
         }
       }
     }
-  }, [doc, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, selected, dpr]);
+  }, [doc, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, selected, dpr, image, projectionY]);
 
   // R31：静态层重建只随「真正影响它的输入」发生。旧版把 rebuildStatic 的 useCallback 直接
   // 喂给 effect 依赖数组，而该回调依赖整份组件闭包——hover/dragPreview/objectGhost 任何一次
@@ -402,7 +432,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
   const staticDeps = [
     doc, mapW, mapH, size.w, size.h, dpr,
     viewport.ox, viewport.oy, ppc,
-    terrainAt, iconTick,
+    terrainAt, iconTick, image, projectionY,
     selected?.kind, selected?.index,
   ];
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -428,11 +458,12 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.w, size.h);
     if (off) ctx.drawImage(off, 0, 0, size.w, size.h);
+    ctx.setTransform(dpr, 0, 0, dpr * projectionY, 0, 0);
     const sx = (cx: number) => (cx - viewport.ox) * ppc;
     const sy = (cy: number) => (cy - viewport.oy) * ppc;
     if (hover) {
       // 建筑工具：悬停幽灵 = 放置占地（footprintW×H，越界红、可放绿白）
-      if (tool.tool === "building") {
+      if (!readOnly && tool.tool === "building") {
         const fw = Math.max(1, Math.floor(tool.footprintW));
         const fh = Math.max(1, Math.floor(tool.footprintH));
         const fits = hover.x + fw <= mapW && hover.y + fh <= mapH;
@@ -473,7 +504,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
       ctx.lineWidth = 1.5;
       ctx.strokeRect(sx(left) + 0.75, sy(top) + 0.75, (right - left) * ppc - 1.5, (bottom - top) * ppc - 1.5);
     }
-  }, [staticTick, hover, dragPreview, objectGhost, tool, size, mapW, mapH, viewport, ppc]);
+  }, [staticTick, hover, dragPreview, objectGhost, tool, size, mapW, mapH, viewport, ppc, projectionY, readOnly, dpr]);
 
   // 滚轮缩放（非被动，锚定光标）——R31 改整数档位（见 zoom-ladder.ts，修旧版单调性缺陷）
   useEffect(() => {
@@ -492,17 +523,17 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
         const nextZoom = stepZoom(baseCell, prev.zoom, dir);
         const nextPpc = ppcOf(baseCell, nextZoom);
         const cellX = prev.ox + localX / prevPpc;
-        const cellY = prev.oy + localY / prevPpc;
+        const cellY = prev.oy + localY / (prevPpc * projectionY);
         return {
           ox: clampView(cellX - localX / nextPpc, mapW, size.w / nextPpc),
-          oy: clampView(cellY - localY / nextPpc, mapH, size.h / nextPpc),
+          oy: clampView(cellY - localY / (nextPpc * projectionY), mapH, size.h / (nextPpc * projectionY)),
           zoom: nextZoom,
         };
       });
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [mapW, mapH, baseCell, size]);
+  }, [mapW, mapH, baseCell, size, projectionY, canvasReady]);
 
   // R31：DPR 变化（拖到不同缩放率显示器）时重新对齐 backing store
   useEffect(() => {
@@ -521,7 +552,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const x = Math.floor(viewport.ox + (clientX - rect.left) / ppc);
-    const y = Math.floor(viewport.oy + (clientY - rect.top) / ppc);
+    const y = Math.floor(viewport.oy + (clientY - rect.top) / (ppc * projectionY));
     if (x >= 0 && y >= 0 && x < mapW && y < mapH) return { x, y };
     return null;
   };
@@ -532,7 +563,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const x = Math.floor(viewport.ox + (clientX - rect.left) / ppc);
-    const y = Math.floor(viewport.oy + (clientY - rect.top) / ppc);
+    const y = Math.floor(viewport.oy + (clientY - rect.top) / (ppc * projectionY));
     if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
     return null;
   };
@@ -542,7 +573,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     if (!doc) return null;
     if (tool.tool === "move-shape") {
       // 地形模式：先补丁后 box（补丁在上层绘制）
-      if (Array.isArray(doc.terrain_patches)) {
+      if (!image && Array.isArray(doc.terrain_patches)) {
         for (let i = (doc.terrain_patches as Array<Record<string, JsonValue>>).length - 1; i >= 0; i -= 1) {
           const raw = (doc.terrain_patches as Array<Record<string, JsonValue>>)[i];
           if (!raw || typeof raw !== "object") continue;
@@ -626,6 +657,13 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
   };
 
   const onDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (readOnly) {
+      if (event.button === 0 || event.button === 1) {
+        panRef.current = { x: event.clientX, y: event.clientY, ox: viewport.ox, oy: viewport.oy };
+        event.preventDefault();
+      }
+      return;
+    }
     // 指针捕获（R11）：拖刷/平移期间事件钉在画布上——鼠标冲出画布边缘松手不再
     // 静默丢弃编辑（此前 mouseup 落在画布外时拖刷不生效，手感即"笔刷切了没用"）
     try {
@@ -677,11 +715,11 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
       // 已置空），在更新器里读 ref 即 "Cannot read properties of null (reading 'ox')"
       const pan = panRef.current;
       const dx = (event.clientX - pan.x) / ppc;
-      const dy = (event.clientY - pan.y) / ppc;
+      const dy = (event.clientY - pan.y) / (ppc * projectionY);
       setViewport((prev) => ({
         ...prev,
         ox: clampView(pan.ox - dx, mapW, size.w / ppc),
-        oy: clampView(pan.oy - dy, mapH, size.h / ppc),
+        oy: clampView(pan.oy - dy, mapH, size.h / (ppc * projectionY)),
       }));
       return;
     }
@@ -720,6 +758,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
   };
 
   const endInteraction = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (readOnly) { panRef.current = null; return; }
     // 仅左键结算（R16 修：此前任何键位的 mouseup 都会触发放置/删除——右键/中键误触）；
     // 中键平移的收尾只清引用
     if (event.button !== 0) {
@@ -762,7 +801,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
     }
   };
 
-  const editable = tool.tool !== "none";
+  const editable = !readOnly && tool.tool !== "none";
 
   return (
     <div className="map-canvas-wrap" data-testid="map-canvas">
@@ -781,6 +820,9 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
           data-css-w={size.w}
           data-css-h={size.h}
           data-dpr={dpr}
+          data-projection={projection}
+          data-readonly={readOnly}
+          data-background={Boolean(image)}
           // R31：静态层重建次数（性能回归读数）。鼠标划过画布 100 次后此值应保持不变——
           // 旧实现每次悬停都重建整张离屏位图，读数会随鼠标移动线性增长。
           data-static-builds={staticBuildsRef.current}
@@ -797,6 +839,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
           onMouseUp={endInteraction}
           onContextMenu={(event) => {
             event.preventDefault();
+            if (readOnly) return;
             // R16 用户裁定：右键≠左键——工具激活时右键=放弃当前工具回预览光标；
             // 预览态右键命中建筑/出生点 → 调参菜单（R20 扩展到单位出生点）
             if (tool.tool !== "none") {
@@ -841,16 +884,16 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
         />
       </div>
       <div className="map-canvas-legend">
-        {[0, 1, 2, 3, 4].map((code) => (
+        {!image ? [0, 1, 2, 3, 4].map((code) => (
           <span key={code} className="legend-item">
             <span className="legend-swatch" style={{ background: TERRAIN_COLORS[code] }} />
             {code}
           </span>
-        ))}
+        )) : null}
         <span className="legend-item">┃ 括号=禁建 · X=通行（逐格，与游戏 L2 一致）· 方块=建筑 · ◇=出生点</span>
         {hover ? (
           <span className="legend-item" data-testid="map-hover">
-            ({hover.x},{hover.y}) 地形 {hover.terrain}
+            ({hover.x},{hover.y}){image ? "" : ` 地形 ${hover.terrain}`}
           </span>
         ) : null}
         <button
@@ -859,7 +902,7 @@ export default function MapCanvas({ doc, tool, onTerrainRect, onBoxAdd, onPlaceA
           title="重置视图（缩放 100%、回到原点）"
           onClick={() => setViewport({ ox: 0, oy: 0, zoom: 1 })}
         >
-          重置视图
+          <RotateCcw size={14} />
         </button>
       </div>
     </div>

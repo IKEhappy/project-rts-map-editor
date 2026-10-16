@@ -1,0 +1,186 @@
+{
+  "units": [
+    {
+      "key": "standard",
+      "name_cn": "通用单位",
+      "note": "map-editor 内置标准参数模板；实体只包含安全基础字段，其他能力从字段树按需添加",
+      "key_prefix": "new_unit",
+      "entity": {
+        "id": 0,
+        "key": "new_unit",
+        "name_cn": "新单位",
+        "role": "vehicle",
+        "hp": 100,
+        "speed": 3,
+        "range": 3,
+        "damage": 5,
+        "armor": 0,
+        "attack_period": 20,
+        "flags": [],
+        "attack_fx": "line",
+        "auto_attack_targets": [
+          "units",
+          "turrets",
+          "buildings"
+        ]
+      },
+      "fields": {
+        "min_range": 0,
+        "vision": 0,
+        "attackable": true,
+        "respawn_seconds": 0,
+        "blast_radii_cells": [
+          1
+        ],
+        "blast_interval_ticks": 5,
+        "tiers": [
+          {
+            "name_cn": "新规格",
+            "size_scale": 1,
+            "hp": 100,
+            "damage": 5,
+            "attack_period": 20,
+            "speed": 3,
+            "range": 3
+          },
+          {
+            "name_cn": "新规格 II",
+            "size_scale": 1.25,
+            "hp": 150,
+            "damage": 7,
+            "attack_period": 20,
+            "speed": 3,
+            "range": 3
+          },
+          {
+            "name_cn": "新规格 III",
+            "size_scale": 1.5,
+            "hp": 200,
+            "damage": 9,
+            "attack_period": 20,
+            "speed": 3,
+            "range": 3
+          }
+        ],
+        "laser": {
+          "targets": [],
+          "range": 6,
+          "period": 45,
+          "damage": 25
+        },
+        "strike": {
+          "line_cells": 7,
+          "bombs_per_cell": 1,
+          "fall_ticks": 15,
+          "bomb_radius": 1
+        },
+        "chain": {
+          "strike_interval_ticks": 10,
+          "land_delay_ticks": 10,
+          "ring_diameter_cells": 4,
+          "ring_width_cells": 0.5,
+          "hex_radius_cells": 4,
+          "triangle_side_cells": 4
+        },
+        "meteor": {
+          "radius_cells": 6,
+          "window_ticks": 200,
+          "fall_ticks": 40,
+          "counts": {
+            "meteor_l": 4,
+            "meteor_m": 6,
+            "meteor_s": 10
+          }
+        },
+        "warp": {
+          "charge_ticks": 40,
+          "interval_ticks": 12,
+          "arrive_delay_ticks": 6,
+          "templates": [
+            {
+              "weight": 1,
+              "slots": {}
+            }
+          ]
+        }
+      },
+      "nested_fields": {
+        "/tiers": {
+          "color": [1, 1, 1],
+          "texture": ""
+        }
+      }
+    }
+  ],
+  "buildings": [
+    {
+      "key": "standard",
+      "name_cn": "通用建筑",
+      "note": "map-editor 内置标准参数模板；实体只包含安全基础字段，其他能力从字段树按需添加",
+      "key_prefix": "new_building",
+      "entity": {
+        "key": "new_building",
+        "name_cn": "新建筑",
+        "hp": 500,
+        "w": 1,
+        "h": 1,
+        "sim_height": 1,
+        "repair_rate": 5,
+        "upgrade_ticks": 200,
+        "max_level": 1,
+        "upgrade_tier_max": 0,
+        "unlocked_lines": 0
+      },
+      "fields": {
+        "init_level": 1,
+        "income": [
+          0,
+          1
+        ],
+        "research": [
+          0,
+          1
+        ],
+        "speed_up": [
+          0,
+          1
+        ],
+        "warp_kill_radius": 0,
+        "cost": 0,
+        "vision": 0,
+        "is_hq": false,
+        "satellite": false,
+        "targets": "ground",
+        "damage": 3,
+        "range": 6,
+        "min_range": 1,
+        "attack_period": 25,
+        "attack_fx": "line",
+        "produce_default": 0,
+        "produce_options": [
+          0
+        ],
+        "produce_lines": 1,
+        "summon": [
+          0
+        ],
+        "lines": [
+          {
+            "unit": "cougar",
+            "tier": 1,
+            "ticks": 60
+          }
+        ]
+      },
+      "nested_fields": {
+        "/lines": {
+          "upgrade": true,
+          "produce_ticks": 60,
+          "income": 1,
+          "research": 1,
+          "speed_up": 1
+        }
+      }
+    }
+  ]
+}

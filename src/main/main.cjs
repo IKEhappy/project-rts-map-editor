@@ -4,10 +4,29 @@
 // 环境变量：ME_RENDERER_URL（dev 时由 scripts/dev.mjs 注入）、ME_CDP=1 开 9222 调试端口、
 //           ME_DATA_DIR / GODOT_EXE 见 store.cjs。
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./store.cjs');
+const { WorkspaceService } = require('./workspace.cjs');
+const assets = require('./assets.cjs');
+const { importMap } = require('./map-import.cjs');
+let workspaces;
+
+function validateProject(projectRoot) {
+  for (const file of ['data/units.json', 'data/buildings.json', 'data/rules.json']) assets.readJson(assets.regularFile(projectRoot, file));
+}
+
+const errorText = (error) => String(error?.message || error);
+const withWorkspace = (id) => {
+  if (!id) throw new Error('请先选择地图文件夹');
+  return workspaces.current(id);
+};
+async function pickFile(options) {
+  const win = BrowserWindow.getFocusedWindow();
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0];
+}
 
 // 渲染进程崩溃留证（R10，2026-09-17）：黑屏事故取证 + 自动重载自愈。
 // 注意：硬崩溃会丢渲染层内存中的未保存编辑——重载是止血不是恢复，编辑请勤保存。
@@ -29,7 +48,9 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1480,
     height: 940,
-    title: 'WarOfState map-editor',
+    title: 'Them: Pixel Front - Map Editor',
+    minWidth: 1000,
+    minHeight: 640,
     frame: false, // 无系统标题栏（T-164 R5）：拖拽靠 CSS app-region，右上自绘控制按钮
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.cjs'),
@@ -81,52 +102,113 @@ function createWindow() {
 }
 
 function registerIpc() {
+  ipcMain.handle('workspace:status', () => {
+    try { return { ok: true, workspace: workspaces.current() }; }
+    catch { return { ok: true, workspace: null }; }
+  });
+  ipcMain.handle('workspace:open', async (_event, payload) => {
+    try {
+      const selected = payload?.path || await pickFile({ properties: ['openDirectory'], title: '选择地图 maps 文件夹' });
+      if (!selected) return { ok: false, error: '已取消选择' };
+      if (path.resolve(selected) === path.parse(path.resolve(selected)).root || fs.existsSync(path.join(selected, 'project.godot'))) throw new Error('请选择地图文件夹，不可选择磁盘根目录或整个 Godot 工程');
+      assets.regularFile(store.env().godotProject, 'src/sim/game_map.gd');
+      const session = workspaces.open({ path: selected, projectRoot: payload?.projectRoot });
+      return { ok: true, workspace: session };
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('workspace:close', (_event, id) => {
+    try { withWorkspace(id); workspaces.close(id); return { ok: true }; }
+    catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('workspace:compare', (_event, id) => {
+    try { withWorkspace(id); return { ok: true, ...workspaces.compare(id) }; }
+    catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('workspace:diff-file', (_event, relative, id) => {
+    try {
+      withWorkspace(id);
+      if (typeof relative !== 'string' || !relative.endsWith('.json')) throw new Error('请选择 JSON 文件');
+      const before = workspaces.readBaseline(id, relative);
+      const current = workspaces.file(id, relative);
+      if (fs.existsSync(current) && (!fs.statSync(current).isFile() || fs.statSync(current).size > assets.MAX_BYTES)) throw new Error('文件不是普通 JSON 或超过 32 MiB');
+      const after = fs.existsSync(current) ? fs.readFileSync(current) : null;
+      if ((before?.length || 0) > assets.MAX_BYTES || (after?.length || 0) > assets.MAX_BYTES) throw new Error('文件超过 32 MiB');
+      return { ok: true, before: before?.toString('utf8') || '', after: after?.toString('utf8') || '' };
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('workspace:restore', (_event, id) => {
+    try { withWorkspace(id); return { ok: true, workspace: workspaces.restore(id, {}) }; }
+    catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('workspace:config', (_event, kind, id) => {
+    try {
+      withWorkspace(id);
+      if (!store.isKind(kind)) throw new Error('未知配置表');
+      return store.readKind(kind, id);
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('assets:background', (_event, doc, id) => {
+    try { withWorkspace(id); return assets.backgroundInfo(workspaces, id, doc, nativeImage); }
+    catch (error) { return { ok: false, source: 'none', background: {}, images: {}, errors: [errorText(error)] }; }
+  });
+  ipcMain.handle('assets:import-image', async (_event, payload) => {
+    try {
+      const id = payload?.workspaceId;
+      withWorkspace(id);
+      const sourcePath = payload.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: 'PNG', extensions: ['png'] }], title: '导入整图 PNG' });
+      if (!sourcePath) return { ok: false, error: '已取消导入' };
+      withWorkspace(id);
+      return assets.importImage(workspaces, id, { ...payload, sourcePath }, nativeImage);
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle('maps:import', async (_event, payload) => {
+    try {
+      const id = payload?.workspaceId;
+      withWorkspace(id);
+      const sourcePath = payload?.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: '地图 JSON', extensions: ['json'] }], title: '导入地图 JSON 与整图资源' });
+      if (!sourcePath) return { ok: false, errors: ['已取消导入'] };
+      withWorkspace(id);
+      return importMap({ workspaces, id, sourcePath, nativeImage, saveMap: store.saveMap });
+    } catch (error) {
+      return { ok: false, errors: [errorText(error)] };
+    }
+  });
   ipcMain.handle('app:meta', () => store.meta());
 
   ipcMain.handle('labels:read', () => store.readLabels());
+  ipcMain.handle('templates:read', () => store.readEditorTemplates());
 
-  ipcMain.handle('config:read', (_event, kind, dataDir) => {
+  ipcMain.handle('config:read', (_event, kind, id) => {
     if (!store.isKind(kind)) {
       return { ok: false, error: `unknown kind: ${kind}` };
     }
     try {
-      return store.readKind(kind, dataDir);
+      withWorkspace(id);
+      return store.readKind(kind, id);
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
   });
 
   ipcMain.handle('config:save', (_event, payload) => {
-    if (!payload || !store.isKind(payload.kind)) {
-      return { ok: false, code: 'usage', errors: [`unknown kind: ${payload && payload.kind}`] };
-    }
-    if (!payload.data || typeof payload.data !== 'object') {
-      return { ok: false, code: 'usage', errors: ['payload.data must be an object'] };
-    }
-    if (payload.dataDir) {
-      const check = store.validateDataDir(payload.dataDir);
-      if (!check.ok) {
-        return { ok: false, code: 'usage', errors: check.errors };
-      }
-    }
     try {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('配置保存参数无效');
+      withWorkspace(payload.workspaceId);
       return store.saveKind(payload);
-    } catch (err) {
-      return { ok: false, code: 'io', errors: [String(err && err.message ? err.message : err)] };
-    }
+    } catch (error) { return { ok: false, code: 'io', errors: [errorText(error)] }; }
   });
 
-  ipcMain.handle('maps:list', () => {
+  ipcMain.handle('maps:list', (_event, id) => {
     try {
-      return store.listMaps(null);
+      return store.listMaps(id);
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err), maps: [] };
     }
   });
 
-  ipcMain.handle('maps:read', (_event, name) => {
+  ipcMain.handle('maps:read', (_event, name, id) => {
     try {
-      return store.readMap(name, null);
+      return store.readMap(name, id);
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
@@ -141,7 +223,7 @@ function registerIpc() {
         name: payload.name,
         data: payload.data,
         baseHash: String(payload.baseHash || ''),
-        mapsDir: null,
+        workspaceId: payload.workspaceId,
         expectCreate: Boolean(payload.expectCreate),
       });
     } catch (err) {
@@ -154,28 +236,30 @@ function registerIpc() {
       return { ok: false, code: 'usage', errors: ['payload.from/to must be strings'] };
     }
     try {
-      return store.renameMap({ from: payload.from, to: payload.to });
+      return store.renameMap(payload);
     } catch (err) {
       return { ok: false, code: 'io', errors: [String(err && err.message ? err.message : err)] };
     }
   });
 
-  ipcMain.handle('maps:open-file', (_event, name) => {
-    const full = store.mapFilePath(String(name || ''));
+  ipcMain.handle('maps:open-file', (_event, name, id) => {
+    let full;
+    try { full = store.mapFilePath(String(name || ''), id); } catch (error) { return { ok: false, error: errorText(error) }; }
     if (!full || !fs.existsSync(full)) return { ok: false, error: `地图不存在：${name}` };
     return shell.openPath(full).then((message) => (message ? { ok: false, error: message } : { ok: true }));
   });
 
-  ipcMain.handle('maps:open-folder', (_event, name) => {
-    const full = store.mapFilePath(String(name || ''));
+  ipcMain.handle('maps:open-folder', (_event, name, id) => {
+    let full;
+    try { full = store.mapFilePath(String(name || ''), id); } catch (error) { return { ok: false, error: errorText(error) }; }
     if (!full || !fs.existsSync(full)) return { ok: false, error: `地图不存在：${name}` };
     // 打开地图目录（若带文件名则定位并选中该文件）
     return shell.openPath(path.dirname(full)).then((message) => (message ? { ok: false, error: message } : { ok: true }));
   });
 
-  ipcMain.handle('assets:read-icon', (_event, name) => {
+  ipcMain.handle('assets:read-icon', (_event, name, id) => {
     try {
-      return store.iconText(name);
+      return store.iconText(name, id);
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
@@ -183,7 +267,7 @@ function registerIpc() {
 
   ipcMain.handle('dialog:pick-folder', async () => {
     const win = BrowserWindow.getFocusedWindow();
-    const options = { properties: ['openDirectory'], title: '选择数据目录（须含 units/buildings/rules.json）' };
+    const options = { properties: ['openDirectory'], title: '选择地图 maps 文件夹' };
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
     if (result.canceled || result.filePaths.length === 0) {
       return { ok: false };
@@ -211,11 +295,22 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
+  workspaces = new WorkspaceService({
+    backupRoot: path.join(app.getPath('userData'), 'backups'),
+    defaultProject: store.env().godotProject,
+    validateProject: (project) => {
+      validateProject(project.projectRoot);
+      if (!/^res:\/\/(data|assets)\//.test(project.resPrefix)) throw new Error('工程内地图目录必须位于 data/ 或 assets/ 下');
+    },
+  });
+  store.configureWorkspace(workspaces, nativeImage);
   registerIpc();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on('will-quit', () => workspaces?.releaseAll());
 
 app.on('window-all-closed', () => app.quit());

@@ -1,6 +1,7 @@
 import type { LabelsReadResult } from "./labels";
 import type {
   ConfigFile,
+  ConfigSavePayload,
   Kind,
   MapReadResult,
   MapSaveResult,
@@ -8,20 +9,29 @@ import type {
   MetaResult,
   ReadResult,
   SaveResult,
+  WorkspaceResult,
+  CompareResult,
+  BackgroundInfo,
 } from "./types";
 
 declare global {
   interface Window {
     meApi: {
+      openWorkspace(payload?: { path?: string; projectRoot?: string }): Promise<WorkspaceResult>;
+      getWorkspace(): Promise<WorkspaceResult>;
+      closeWorkspace(): Promise<{ ok: boolean; error?: string }>;
+      compareWorkspace(): Promise<CompareResult>;
+      diffFile(relative: string): Promise<{ ok: boolean; before?: string; after?: string; error?: string }>;
+      restoreWorkspace(): Promise<WorkspaceResult>;
+      readWorkspaceConfig(kind: Kind): Promise<ReadResult>;
+      backgroundInfo(doc: ConfigFile): Promise<BackgroundInfo>;
+      importImage(payload: { mapId: string; view: "tilt" | "topdown" | "image"; sourcePath?: string }): Promise<{ ok: boolean; path?: string; width?: number; height?: number; error?: string }>;
+      importMap(payload?: { sourcePath?: string }): Promise<{ ok: boolean; name?: string; errors?: string[] }>;
       meta(): Promise<MetaResult>;
       labels(): Promise<LabelsReadResult>;
-      read(kind: Kind, dataDir?: string | null): Promise<ReadResult>;
-      save(payload: {
-        kind: Kind;
-        data: ConfigFile;
-        baseHash: string;
-        dataDir?: string | null;
-      }): Promise<SaveResult>;
+      editorTemplates?(): Promise<{ ok: boolean; data?: ConfigFile; error?: string }>;
+      read(kind: Kind): Promise<ReadResult>;
+      save(payload: ConfigSavePayload): Promise<SaveResult>;
       listMaps(): Promise<MapsListResult>;
       readMap(name: string): Promise<MapReadResult>;
       saveMap(payload: {
@@ -30,14 +40,14 @@ declare global {
         baseHash: string;
         expectCreate?: boolean;
       }): Promise<MapSaveResult>;
-      renameMap(payload: { from: string; to: string }): Promise<MapSaveResult>;
+      renameMap(payload: { from: string; to: string; baseHash?: string }): Promise<MapSaveResult>;
       openMapFile(name: string): Promise<{ ok: boolean; error?: string }>;
       openMapFolder(name: string): Promise<{ ok: boolean; error?: string }>;
       readIcon(name: string): Promise<{ ok: boolean; text?: string; error?: string }>;
       pickFolder(): Promise<{ ok: boolean; path?: string }>;
       windowCtl(action: "minimize" | "maximize" | "close" | "close-now"): Promise<{ ok: boolean }>;
-      onWindowState(callback: (maximized: boolean) => void): void;
-      onCloseRequest(callback: () => void): void;
+      onWindowState(callback: (maximized: boolean) => void): () => void;
+      onCloseRequest(callback: () => void): () => void;
     };
   }
 }

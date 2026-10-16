@@ -232,16 +232,29 @@ function isIndex(value: unknown, min: number): value is number {
 
 export function validateMapTree(doc: Entity): Map<string, string> {
   const errors = new Map<string, string>();
+  if (doc.background !== undefined && doc.background !== null) {
+    const background = doc.background;
+    if (typeof background !== "object" || Array.isArray(background)) {
+      errors.set("background", "background：须为对象 {tilt?,topdown?,image?}，错误声明不会回退渲染配置");
+    } else {
+      for (const [key, value] of Object.entries(background)) {
+        if (!["tilt", "topdown", "image"].includes(key)) errors.set(`background-${key}`, `background：未知视角 ${key}`);
+        else if (typeof value !== "string") errors.set(`background-${key}`, `${key}：须为 PNG 资源路径字符串`);
+        else if (value !== "" && (!value.startsWith("res://") || !value.toLowerCase().endsWith(".png") || value.slice(6).split("/").some((part) => !part || part === "." || part === "..") || /[\\\x00-\x1f\x7f]/.test(value))) errors.set(`background-${key}`, `${key}：须为项目内 res:// PNG 资源路径`);
+      }
+    }
+  }
   const width = doc.width;
   const height = doc.height;
   if (!isIndex(width, 1) || width > 512) errors.set("width", "width：须为 1..512 的整数（格）");
   if (!isIndex(height, 1) || height > 512) errors.set("height", "height：须为 1..512 的整数（格）");
 
   const patches: unknown = doc.terrain_patches;
+  if (patches !== undefined && !Array.isArray(patches)) errors.set("terrain_patches", "terrain_patches：须为对象数组");
   if (Array.isArray(patches)) {
     patches.forEach((patch, index) => {
       const base = `terrain_patches-${index}`;
-      if (patch === null || typeof patch !== "object") {
+      if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
         errors.set(base, "terrain_patches：元素须为对象 {x,y,w,h,terrain}");
         return;
       }
@@ -263,50 +276,64 @@ export function validateMapTree(doc: Entity): Map<string, string> {
   }
 
   // R20：占位冲突警告——建筑/单位/炮台任意两者不得重合（触发召唤物点位不占位、可覆盖）
-  const blds = Array.isArray(doc.buildings) ? (doc.buildings as Array<Record<string, unknown>>) : [];
+  const objectRows = (key: "buildings" | "spawns" | "decor"): Array<[number, Record<string, unknown>]> => {
+    const raw = doc[key];
+    if (raw === undefined) return [];
+    if (!Array.isArray(raw)) { errors.set(key, `${key}：须为对象数组`); return []; }
+    const rows: Array<[number, Record<string, unknown>]> = [];
+    raw.forEach((value, index) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) errors.set(`${key}-${index}`, `${key}：元素须为对象`);
+      else rows.push([index, value]);
+    });
+    return rows;
+  };
+  const blds = objectRows("buildings");
+  objectRows("decor");
   for (let i = 0; i < blds.length; i += 1) {
-    const a = blds[i];
+    const [originalIndex, a] = blds[i];
     const ax = Number(a.x);
     const ay = Number(a.y);
     const aw = Number(a.w ?? 1);
     const ah = Number(a.h ?? 1);
     for (let j = i + 1; j < blds.length; j += 1) {
-      const b = blds[j];
+      const [, b] = blds[j];
       const bx = Number(b.x);
       const by = Number(b.y);
       const bw = Number(b.w ?? 1);
       const bh = Number(b.h ?? 1);
       if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) {
-        errors.set(`buildings-${i}-overlap`, `建筑占位重叠：${String(a.key ?? "?")} 与 ${String(b.key ?? "?")}（地图内理论不可重合，请挪开）`);
+        errors.set(`buildings-${originalIndex}-overlap`, `建筑占位重叠：${String(a.key ?? "?")} 与 ${String(b.key ?? "?")}（地图内理论不可重合，请挪开）`);
       }
     }
   }
-  const spawnRows = Array.isArray(doc.spawns) ? (doc.spawns as Array<Record<string, unknown>>) : [];
+  const spawnRows = objectRows("spawns");
   for (let i = 0; i < spawnRows.length; i += 1) {
-    const sx = Number(spawnRows[i].x);
-    const sy = Number(spawnRows[i].y);
-    for (const b of blds) {
+    const [originalIndex, spawn] = spawnRows[i];
+    const sx = Number(spawn.x);
+    const sy = Number(spawn.y);
+    for (const [, b] of blds) {
       const bx = Number(b.x);
       const by = Number(b.y);
       const bw = Number(b.w ?? 1);
       const bh = Number(b.h ?? 1);
       if (sx >= bx && sy >= by && sx < bx + bw && sy < by + bh) {
-        errors.set(`spawns-${i}-overlap`, `出生点（${sx},${sy}）落在建筑 ${String(b.key ?? "?")} 占位内（不可重合）`);
+        errors.set(`spawns-${originalIndex}-overlap`, `出生点（${sx},${sy}）落在建筑 ${String(b.key ?? "?")} 占位内（不可重合）`);
         break;
       }
     }
     for (let j = i + 1; j < spawnRows.length; j += 1) {
-      if (Number(spawnRows[j].x) === sx && Number(spawnRows[j].y) === sy) {
-        errors.set(`spawns-${i}-dup`, `出生点重复占格：（${sx},${sy}）出现多次（不可重合）`);
+      if (Number(spawnRows[j][1].x) === sx && Number(spawnRows[j][1].y) === sy) {
+        errors.set(`spawns-${originalIndex}-dup`, `出生点重复占格：（${sx},${sy}）出现多次（不可重合）`);
       }
     }
   }
 
   const boxes: unknown = doc.box_mode;
+  if (boxes !== undefined && !Array.isArray(boxes)) errors.set("box_mode", "box_mode：须为对象数组");
   if (Array.isArray(boxes)) {
     boxes.forEach((box, index) => {
       const base = `box_mode-${index}`;
-      if (box === null || typeof box !== "object") {
+      if (box === null || typeof box !== "object" || Array.isArray(box)) {
         errors.set(base, "box_mode：元素须为对象 {start,end,access,build}");
         return;
       }

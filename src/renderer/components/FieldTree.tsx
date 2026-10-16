@@ -4,6 +4,8 @@ import { enumOptions, fieldLabel, type LabelsData } from "../labels";
 import Dropdown, { type DropdownOption } from "./Dropdown";
 import { FieldLabelView } from "./LabelBits";
 import type { UnitSuggestion } from "../suggest";
+import { FIELD_CREATABLE } from "../field-defaults";
+import { defaultsAtPath, type FeatureSchema } from "../schema-templates";
 
 type Path = Array<string | number>;
 
@@ -16,6 +18,8 @@ interface Props {
   /** 新实体（未存在于已保存文件）：key/id 可编辑（T-164 R10，保存后锁定） */
   identityEditable?: boolean;
   onChange(next: Entity): void;
+  /** Union schema from the current document plus the RAM fallback. */
+  featureSchema?: FeatureSchema;
 }
 
 const IDENTITY_FIELDS = new Set(["id", "key"]);
@@ -26,19 +30,9 @@ const ARRAY_DEFAULTS: Record<string, JsonValue> = {
   auto_attack_targets: "units",
   blast_radii_cells: 1,
   color: 0,
-};
-
-/** R30：对象字段可创建默认值——地图条目初始缺 lines/unlocked_lines 等字段时"＋ 新增字段"用 */
-const FIELD_CREATABLE: Record<string, JsonValue> = {
-  lines: [], // 数组：创建空数组后即可"＋ 添加"行
-  unlocked_lines: 1,
-  income: 1,
-  research: 1,
-  speed_up: 1,
-  level: 1,
-  hp: 500,
-  team: 1,
-  count: 1,
+  targets: 0,
+  produce_options: 0,
+  summon: 0,
 };
 
 /** 锁定增删的对象数组：tiers 固定 3 行（MatchConfig 校验器锁死） */
@@ -209,11 +203,12 @@ function parentAt(root: Entity, path: Path): Record<string, JsonValue> | JsonVal
 
 /** 选中实体的字段树：标量行内编辑；标量数组逐元素增删/排序；对象数组（tiers/lines）嵌套展开。 */
 export default function FieldTree(props: Props) {
-  const { entity, original, labels, lightErrors, unitSuggestions, identityEditable, onChange } = props;
+  const { entity, original, labels, lightErrors, unitSuggestions, identityEditable, onChange, featureSchema } = props;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   // 顶层字段拖拽排序（T-164 R10：三横杠手柄拖动调整字段顺序，写回 JSON 键序）
   const [dragField, setDragField] = useState<string | null>(null);
   const [dropField, setDropField] = useState<string | null>(null);
+  const [arrayTypes, setArrayTypes] = useState<Record<string, string>>({});
 
   const moveField = (from: string, to: string) => {
     if (from === to) return;
@@ -259,9 +254,15 @@ export default function FieldTree(props: Props) {
     const arr = cursor as JsonValue[];
     const last = arr[arr.length - 1];
     const options = enumOptions(labels, field);
+    const defaults = featureSchema ? defaultsAtPath(featureSchema, arrayPath.slice(0, -1))[field] : undefined;
     let element: JsonValue;
     if (last !== undefined) {
       element = deepClone(last);
+    } else if (arrayTypes[pathKey(arrayPath)]) {
+      const type = arrayTypes[pathKey(arrayPath)];
+      element = type === "number" ? 0 : type === "boolean" ? false : type === "string" ? "" : {};
+    } else if (Array.isArray(defaults) && defaults.length > 0) {
+      element = deepClone(defaults[0]);
     } else if (field in ARRAY_DEFAULTS) {
       element = deepClone(ARRAY_DEFAULTS[field]);
     } else if (options && options.length > 0) {
@@ -279,19 +280,22 @@ export default function FieldTree(props: Props) {
   const AddFieldButton = ({ path }: { path: Path }) => {
     const [open, setOpen] = useState(false);
     const [name, setName] = useState("");
+    const [valueType, setValueType] = useState("string");
     const existing = new Set<string>();
     let cursor: JsonValue = entity;
     for (const seg of path) cursor = getAt(cursor as Record<string, JsonValue> | JsonValue[], seg);
     if (cursor && typeof cursor === "object" && !Array.isArray(cursor)) {
       for (const k of Object.keys(cursor as Record<string, JsonValue>)) existing.add(k);
     }
-    const candidates = Object.keys(FIELD_CREATABLE).filter((k) => !existing.has(k));
+    const schemaDefaults = featureSchema ? defaultsAtPath(featureSchema, path) : FIELD_CREATABLE;
+    const candidates = Object.keys(schemaDefaults).filter((k) => !existing.has(k));
     const commit = (fieldName: string) => {
       if (!fieldName || existing.has(fieldName)) return;
       const next = deepClone(entity);
       let cur: Record<string, JsonValue> | JsonValue[] = next;
       for (const seg of path) cur = getAt(cur, seg);
-      (cur as Record<string, JsonValue>)[fieldName] = deepClone(FIELD_CREATABLE[fieldName] ?? "");
+      const customValue: JsonValue = valueType === "number" ? 0 : valueType === "boolean" ? false : valueType === "object" ? {} : valueType === "array" ? [] : "";
+      (cur as Record<string, JsonValue>)[fieldName] = deepClone(schemaDefaults[fieldName] ?? customValue);
       onChange(next);
       setOpen(false);
       setName("");
@@ -314,6 +318,13 @@ export default function FieldTree(props: Props) {
               }}
             />
             <button className="mini" data-testid={`add-field-ok-${pathKey(path)}`} title="创建" onClick={() => commit(name.trim())}>✓</button>
+            <select className="cell" aria-label="新字段类型" data-testid={`add-field-type-${pathKey(path)}`} value={valueType} onChange={(event) => setValueType(event.target.value)}>
+              <option value="string">文本</option>
+              <option value="number">数值</option>
+              <option value="boolean">布尔</option>
+              <option value="object">对象</option>
+              <option value="array">数组</option>
+            </select>
             {candidates.length > 0 ? (
               <select
                 className="cell"
@@ -323,7 +334,7 @@ export default function FieldTree(props: Props) {
                   if (e.target.value) commit(e.target.value);
                 }}
               >
-                <option value="">常用字段…</option>
+                <option value="">标准字段…</option>
                 {candidates.map((k) => (
                   <option key={k} value={k}>{k}</option>
                 ))}
@@ -468,6 +479,7 @@ export default function FieldTree(props: Props) {
                       renderFieldRow(childField, childValue, originalChild, childPath, false)
                     }
                   />
+                  {featureSchema ? <AddFieldButton path={[...path, index]} /> : null}
                 </div>
               ) : (
                 <div className="tree-row" key={index}>
@@ -488,9 +500,17 @@ export default function FieldTree(props: Props) {
               ),
             )}
             {!locked ? (
-              <button className="mini add" onClick={() => addElement(path, field)}>
-                ＋ 添加
-              </button>
+              <div className="add-field-row">
+                <button className="mini add" onClick={() => addElement(path, field)}>＋ 添加</button>
+                {values.length === 0 && !(field in ARRAY_DEFAULTS) && field !== "lines" ? <select
+                  className="cell"
+                  aria-label="数组元素类型"
+                  value={arrayTypes[key] ?? "object"}
+                  onChange={(event) => setArrayTypes((previous) => ({ ...previous, [key]: event.target.value }))}
+                >
+                  <option value="object">对象</option><option value="string">文本</option><option value="number">数值</option><option value="boolean">布尔</option>
+                </select> : null}
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -601,6 +621,7 @@ export default function FieldTree(props: Props) {
       {Object.entries(entity).map(([field, value]) =>
         renderFieldRow(field, value, (original as Record<string, JsonValue>)[field], [field], IDENTITY_FIELDS.has(field), true),
       )}
+      {featureSchema ? <AddFieldButton path={[]} /> : null}
     </div>
   );
 }

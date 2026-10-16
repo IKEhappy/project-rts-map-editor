@@ -13,15 +13,17 @@
 //   { menu: "<testId>" }                                                         点菜单项
 //   { save: true }                                                               保存（过门禁）
 //   { sleep: ms }                                                                等待
-import CDP from "chrome-remote-interface";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { apiCall, launchEditor, reload } from "./workspace-smoke.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const casesDir = path.join(root, "tests", "cases");
-const sandbox = path.join(root, ".case-data");
+const caseParent = path.join(root, ".smoke-data");
+fs.mkdirSync(caseParent, { recursive: true });
+const sandbox = fs.mkdtempSync(path.join(caseParent, "cases-"));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let failures = 0;
@@ -156,43 +158,38 @@ async function runOps(client, ops) {
 }
 
 async function main() {
-  execSync("npx vite build", { cwd: root, stdio: "inherit" });
-  const caseNames = process.argv.slice(2).length > 0 ? process.argv.slice(2) : fs.readdirSync(casesDir).filter((n) => fs.existsSync(path.join(casesDir, n, "A.json")));
+  const args = process.argv.slice(2);
+  if (!args.includes("--no-build")) execSync("npx vite build", { cwd: root, stdio: "inherit" });
+  const requested = args.filter((arg) => arg !== "--no-build");
+  const caseNames = requested.length > 0 ? requested : fs.readdirSync(casesDir).filter((n) => fs.existsSync(path.join(casesDir, n, "A.json")));
   if (caseNames.length === 0) {
     console.log("无 Case（tests/cases/ 下需有 <case>/A.json）");
     process.exit(0);
   }
 
-  fs.rmSync(sandbox, { recursive: true, force: true });
   fs.mkdirSync(path.join(sandbox, "maps"), { recursive: true });
   const projectData = path.join(root, "..", "project-rts", "data");
   for (const name of ["units.json", "buildings.json"]) {
     fs.copyFileSync(path.join(projectData, name), path.join(sandbox, name));
   }
 
-  const app = spawn("npx", ["electron", "."], {
-    cwd: root,
-    shell: true,
-    stdio: ["ignore", "ignore", "ignore"],
-    env: { ...process.env, ME_MAPS_DIR: path.join(sandbox, "maps"), ME_CDP: "1", ME_CDP_PORT: "9230" },
+  fs.mkdirSync(path.join(root, ".smoke-artifacts"), { recursive: true });
+  const editor = await launchEditor({
+    executable: path.join(root, "node_modules", "electron", "dist", "electron.exe"),
+    args: [root], cwd: root, port: 9230,
   });
-  let client = null;
+  const client = editor.client;
+  // runOps uses UI reload/confirm paths while changing the disposable workspace.
+  // Auto-accept native dialogs so one case cannot leave CDP paused for the next.
+  client.Page.javascriptDialogOpening(async () => {
+    await client.Page.handleJavaScriptDialog({ accept: true }).catch(() => {});
+  });
+  const runtimeErrors = [];
+  client.Runtime.exceptionThrown(({ exceptionDetails }) => runtimeErrors.push(exceptionDetails.exception?.description || exceptionDetails.text));
+  client.Runtime.consoleAPICalled(({ type, args }) => { if (type === "error") runtimeErrors.push(args.map((arg) => arg.value ?? arg.description).join(" ")); });
   try {
-    let page = null;
-    for (let i = 0; i < 60 && page === null; i += 1) {
-      await sleep(500);
-      try {
-        const list = await (await fetch("http://127.0.0.1:9230/json/list")).json();
-        page = list.find((t) => t.type === "page" && t.url.includes("index.html")) ?? null;
-      } catch {
-        /* not up */
-      }
-    }
-    client = await CDP({ target: page.webSocketDebuggerUrl, port: 9230 });
-    await client.Runtime.enable();
     await ev(client, `localStorage.clear()`);
-    await ev(client, `location.reload()`);
-    await sleep(2500);
+    await reload(client);
 
     let caseIndex = 0;
     for (const name of caseNames) {
@@ -207,6 +204,10 @@ async function main() {
       // 重置沙盒：写 A → UI 里新建同 A 内容地图（走新建→改内容→另存为 fileName）最麻烦；
       // 简化：直接把 A 写进沙盒 maps 目录 + 刷新列表 + 选中操作
       fs.writeFileSync(path.join(sandbox, "maps", fileName), JSON.stringify(A, null, 2) + "\n", "utf8");
+      const opened = await apiCall(client, "openWorkspace", { path: path.join(sandbox, "maps"), projectRoot: path.dirname(projectData) });
+      if (!opened.ok) throw new Error(`workspace open failed: ${JSON.stringify(opened)}`);
+      await reload(client);
+      await waitFor(client, `!!document.querySelector('[data-testid="map-item-${fileName.replace(/\./g, "-")}"]')`, 15000, "maps workspace list");
       await click(client, "tab-maps");
       await click(client, "map-reload-btn"); // 刷新文件列表
       await sleep(500);
@@ -223,10 +224,9 @@ async function main() {
         fs.writeFileSync(path.join(root, ".smoke-artifacts", `case-${name}-C.json`), JSON.stringify(C, null, 2));
       }
     }
+    check("JavaScript runtime and console errors zero", runtimeErrors.length === 0, runtimeErrors.join(" | "));
   } finally {
-    if (client) await client.close().catch(() => {});
-    if (process.platform === "win32") execSync(`taskkill /PID ${app.pid} /T /F`, { stdio: "ignore" });
-    else app.kill();
+    await editor.close();
   }
   console.log(failures === 0 ? "CASES_OK" : `CASES_FAIL failures=${failures}`);
   process.exit(failures === 0 ? 0 : 1);

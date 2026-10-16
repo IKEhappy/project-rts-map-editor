@@ -48,13 +48,16 @@ func _run(args: PackedStringArray) -> Dictionary:
 	if not bool(parse.get("ok", false)):
 		return _rejected([String(parse.get("error", "cannot read candidate"))])
 	var data: Dictionary = parse.get("data", {})
+	var asset_errors: Array = _validate_background(data)
+	if not asset_errors.is_empty():
+		return _rejected(asset_errors)
 
 	# 结构可解析性预检（防加载器 assert 中止致无协议输出）：数值尺寸缺失/非正不是语义
 	# 裁定，是 GameMap.from_dict 的既定硬约束，此处仅翻译成可读拒绝理由。
 	for size_key: String in ["width", "height"]:
 		var size_value: Variant = data.get(size_key, null)
-		if not (size_value is int or size_value is float) or float(size_value) <= 0.0 \
-				or not is_finite(float(size_value)):
+		if not (size_value is int or size_value is float) or not is_finite(float(size_value)) \
+				or float(size_value) < 1.0 or float(size_value) > 512.0 or floorf(float(size_value)) != float(size_value):
 			return _rejected(["%s 必须为正数（GameMap.from_dict 断言约束）：实际 %s" % [size_key, str(size_value)]])
 
 	# 候选写进工程根 → 走真实 build_level 链路（含地图 JSON 加载、建筑/出生装配、AI 队伍）
@@ -136,6 +139,56 @@ func _run(args: PackedStringArray) -> Dictionary:
 	if not errors.is_empty():
 		return _rejected(errors)
 	return {"ok": true, "mode": "check", "errors": []}
+
+
+func _validate_background(data: Dictionary) -> Array:
+	var errors: Array = []
+	var source: Variant = data.get("background", null)
+	if source != null and not source is Dictionary:
+		return ["background must be an object"]
+	if source == null or (source as Dictionary).is_empty():
+		var renderer: String = String(data.get("renderer", ""))
+		if not renderer.is_empty():
+			if not _allowed_resource(renderer, ".json"):
+				return ["renderer path is outside allowed resource roots"]
+			var config: Dictionary = _read_json(renderer)
+			if not bool(config.get("ok", false)):
+				return [String(config.get("error", "invalid renderer"))]
+			source = (config.get("data", {}) as Dictionary).get("background", null)
+	if source == null:
+		return errors
+	if not source is Dictionary:
+		return ["renderer.background must be an object"]
+	var background: Dictionary = source
+	for key: Variant in background:
+		if not String(key) in ["tilt", "topdown", "image"]:
+			errors.append("unknown background key: %s" % String(key))
+	for view: String in ["tilt", "topdown", "image"]:
+		var value: Variant = background.get(view, "")
+		if not value is String:
+			errors.append("background.%s must be a resource path" % view)
+			continue
+		var resource: String = value
+		if resource.is_empty():
+			continue
+		if not _allowed_resource(resource, ".png"):
+			errors.append("background.%s path is outside allowed resource roots" % view)
+			continue
+		var texture: Texture2D = load(resource) as Texture2D
+		if texture == null:
+			errors.append("background.%s cannot be loaded by Godot: %s" % [view, resource])
+	return errors
+
+
+func _allowed_resource(resource: String, extension: String) -> bool:
+	if not (resource.begins_with("res://data/") or resource.begins_with("res://assets/")):
+		return false
+	if not resource.to_lower().ends_with(extension) or "\\" in resource:
+		return false
+	for part: String in resource.trim_prefix("res://").split("/"):
+		if part.is_empty() or part == "." or part == ".." or ":" in part:
+			return false
+	return true
 
 
 func _read_json(path: String) -> Dictionary:

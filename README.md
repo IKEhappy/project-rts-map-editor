@@ -1,17 +1,39 @@
-# map-editor —— WarOfState-Remake / them-pixel-front 外置数据工具
+# map-editor - Them: Pixel Front 地图工作台
 
-T-164（2026-09-14 立项）。**JSON 编辑不进游戏内**，本工具用 Electron 开发，方便 AI 在
-CDP（内置 Chromium）里做 DOM 级调试与验证。R2 范围：`units.json` / `buildings.json` /
-`rules.json` **主从布局 + 字段树**编辑（嵌套数组/对象逐项增删排序）、`labels.json` 字段/枚举
-中文化（显示层）。**R7（2026-09-17）地图编辑上线**：dev-2d（project-rts）`data/maps/*.json`
-多文件编辑 + 2D 画布预览 + 真实构建链路门禁，详见下文「地图编辑（R7）」。campaign 表单、
-effective/impact 视图为 R8+。
+Electron + React + TypeScript 外置地图工具。2026-10-16 起以用户明确选择的 **maps 文件夹**
+为地图与贴图的可写工作区；单位、建筑、规则表保留原有表单编辑，绑定该地图所属工程的 `data/`。
+
+## 当前工作流（2026-10-16）
+
+1. 启动后输入或浏览地图目录，例如 `D:\T4Studio\Game\them-pixel-front\project-rts\data\maps`。
+   不会自动打开默认地图目录。工程内目录自动识别所属 Godot 工程；离线地图目录可指定工程，
+   否则使用工具附带的校验工程与配置。
+2. **每次打开目录均新建 ZIP 备份**。备份位于 Electron userData 的 `backups/<目录哈希>/`，
+   不放进 maps。工具栏显示本次基线时间，悬停可查看 ZIP 路径。
+3. 左侧地图列表、中间画布、右侧属性。模式 1 保留瓦片地图编辑；模式 2 支持整图背景，
+   `topdown` / `tilt` / `image` 三个 PNG 槽位与游戏的视角回退顺序一致。
+   正上方俯视可编辑 box、建筑、出生点、装饰；倾角用于只读预览。
+4. 导入 PNG 后资源复制到 maps 内 `_assets/`，地图保存标准 `res://` 引用。
+   导入地图 JSON 时一并迁移已支持的 renderer/PNG 依赖，通过 Godot 门禁后才发布地图。
+5. 「目录对比」以本次打开时的磁盘字节为基线，显示新增、删除、修改及 JSON 原文对照。
+   未保存编辑不计入磁盘对比。「完全恢复」会删除新增内容并恢复全部原文件和空目录，
+   同时丢弃内存编辑。关闭后重新打开同一目录，会以那时的内容重新备份。
+6. 「单位表 / 建筑表 / 规则表」保留实体搜索、中文字段树、规则表单、模板新建、原值对照和
+   撤销重做。切页保留编辑，关闭前统一询问保存；配置保存使用 Godot 门禁、外部修改检查和 `.bak`。
+   配置表在其所属工程 `data/` 中，**地图 ZIP 与地图完全恢复只覆盖 maps，不覆盖这三张表**。
+7. 单位与建筑内置通用标准模板，Tree 顶层和嵌套对象可按「＋ 新增字段」添加 Feature。
+   模板优先从项目数据文件读取，再读取工具配置，缺失时使用 RAM 模板；新增游戏字段会自动扫描。
+   数据格式、完整字段清单与扩展方式见 [标准参数模板](docs/entity-templates.md)。
+
+保存仍执行外部修改 hash 检查、资源校验、隔离 Godot 构建门禁、单代 `.bak`、原子替换。
+导入与恢复的边界、架构和限制见 [工作区与导入管线](docs/workspace-import.md)。
+
+以下 R7-R31 条目保留历史记录；与当前工作流冲突时，以本节及上述架构文档为准。
 
 ## 地图编辑（R7，2026-09-17）
 
-- **数据源**：`project-rts/data/maps/*.json`（env `ME_MAPS_DIR` 可覆盖；`ME_MAP_PROJECT`
-  默认 `project-rts`）。工具默认工程按存在性解析：姊妹检出 `war-of-state` 优先（打包/旧
-  布局），否则本工作区 `project-rts`（dev-2d）——数据与校验权威同源。
+- **历史数据源**：R7 曾使用环境变量默认选图。当前必须显式选择地图目录；
+  校验代码优先使用本工作区 `project-rts`，仅保留旧打包布局回退。
 - **编辑面**：左地图列表（含「＋ 新建地图」最小合法骨架模板）· 中字段树（复用嵌套
   增删排序；地形码 0..4 / box_mode access 0..3 / build 0..1 枚举下拉中文化）·
   右画布预览（地形着色 + terrain_patches + **box_mode 范围叠加——框=建造红/X=通行色，
@@ -305,7 +327,7 @@ effective/impact 视图为 R8+。
 
 - **gate exit 0 才写盘**——校验权威单一 = `war-of-state/src/data/match_config.gd`
   （`MatchConfig.validate`），gate 脚本零独立校验逻辑，TS 轻校验禁止扩展语义；
-- **git 首提仍是前置债**（仓库未 init）——当前靠单代 `.bak` 兜底，尽快补 git；
+- 当前地图目录以每次打开时的 ZIP 备份为完整恢复基线，单代 `.bak` 保留用于单文件备查；
 - 工具代码全部在本目录（`map-editor/`），**不进 Godot 工程**；`node_modules/` 已忽略；
 - R1 不支持实体/规则键增删（gate 会以 "R1 禁止新增/删除" 拒绝；实体增删需 id 分配 +
   资产注册联动，须专项）；
@@ -323,13 +345,17 @@ map-editor/
   scripts/no-op-check.cjs    # 冒烟辅助：无改动不写盘断言
   src/main/main.cjs          # Electron 主进程：窗口 + IPC
   src/main/store.cjs         # 读/原子写/.bak/哈希守卫/gate 子进程/labels 读取（纯 node，可单测）
+  src/main/workspace.cjs     # 显式目录会话、ZIP 基线、字节对比、完整恢复与中断恢复
+  src/main/assets.cjs        # 路径约束、PNG 解码与资源导入
+  src/main/map-import.cjs    # 外部地图与 renderer 图片依赖迁移
   src/preload/preload.cjs    # contextBridge 唯一桥
   src/renderer/              # React + TS + Vite（纯 web）
     components/FieldTree.tsx    # 嵌套字段树（元素 ↑↓✕＋；tiers 锁 3 行）
     components/EntityList.tsx   # 左侧实体列表（搜索：名称/key/id）
     components/RulesTable.tsx   # 规则键值表（键带中文）
     components/MapsPanel.tsx    # 地图面板：列表/字段树/画布三栏（R7）
-    components/MapCanvas.tsx    # 地图 2D 预览：地形/box_mode/建筑/出生点（只读）
+    components/MapCanvas.tsx    # 双视角地图画布：整图/地形示意/box/建筑/出生点
+    components/BackgroundInspector.tsx # 地图尺寸、整图槽位、视角与资源状态
   .gate/                     # gate 候选文件（运行时生成，已忽略）
 ```
 
@@ -342,6 +368,9 @@ npm install        # 首次。注意：若 Electron 二进制下载失败（GitH
 npm run dev        # 开发（vite HMR + electron，自动开 CDP 9222；ME_NO_CDP=1 关闭）
 npm run smoke      # E2E 冒烟：vite build → 沙盒数据目录起真窗口 → CDP 断言（专用端口 9223，不干扰 dev）→ 截图
 npm run build      # 仅构建渲染层到 dist/
+npm start          # 使用已构建 dist 启动 Electron
+npm run typecheck
+npm run test:unit
 npm run pack       # 打包可移植成品到 release/WosMapEditor-win64/（自动跑成品 CDP 冒烟；--no-verify 跳过）
 npm run pack:zip   # 打包 + 产出 zip 分发包（PowerShell Compress-Archive）
 ```
@@ -354,11 +383,11 @@ npm run pack:zip   # 打包 + 产出 zip 分发包（PowerShell Compress-Archive
 | 内置物 | 位置 | 说明 |
 |---|---|---|
 | Electron 44 运行时 | 根目录（exe/dll/pak/locales） | 自带 Chromium+Node，约 368MB |
-| 应用代码 | `resources/app/` | 主进程/preload/渲染层 dist/gate 脚本/labels.json，零 npm 运行时依赖 |
+| 应用代码 | `resources/app/` | 主进程/preload/dist/gate/labels.json，含 adm-zip 运行时依赖 |
 | Godot 4.7.2 双 exe | `resources/godot/` | console 启动器 + 主程序（保存门禁用，spawn 输出捕获依赖 console 版），约 173MB |
-| gate 工程子集 | `resources/war-of-state/` | 精简 project.godot（剥 autoload/main_scene）+ src + data；打包时 `--import` 生成 class_name 解析缓存并跑 lint 自检 |
+| gate 工程子集 | `resources/project-rts/` | src + data + 图片资产；最小启动场景与无初始化副作用的 autoload 适配器；打包时执行 import 与配置自检 |
 
-注意：打包版编辑的是**包内** `resources/war-of-state/data/`（便携副本），与开发仓库互不影响；
+打包版也必须选择地图目录，只修改所选目录；包内工程用于校验与只读参考。
 成品为未签名 exe，首次运行 SmartScreen 可能提示"仍要运行"；仅限 Windows x64（跨平台需换对应
 Electron dist 重打）；zip 分发包解压后保持目录结构直接运行（.NET ZipFile 产出，自动跳过陈旧
 锁定文件并做体积校验）。
@@ -375,7 +404,7 @@ Electron dist 重打）；zip 分发包解压后保持目录结构直接运行�
 
 诊断占用进程：`powershell -File scripts/find-locker.ps1 -Path <被锁文件>`（Restart Manager API）。
 
-数据目录默认 `../war-of-state/data`，可用 `ME_DATA_DIR` 覆盖（冒烟即用沙盒目录）；
+校验代码默认 `../project-rts`，可用 `ME_GODOT_PROJECT` 覆盖；工作区配置取自绑定工程。
 Godot 可执行默认 `D:\envir\GodotEngine\Godot_v4.7.2-stable_win64_console.exe`，用 `GODOT_EXE` 覆盖
 （打包成品优先使用内置副本）。
 
@@ -387,14 +416,12 @@ Godot 可执行默认 `D:\envir\GodotEngine\Godot_v4.7.2-stable_win64_console.ex
 语义不变（canonical 一致）。窗口为无框样式：顶栏拖拽移动、双击最大化，右上自绘
 最小化/最大化还原/关闭按钮。
 
-### 导入外部数据目录（T-164 R4）
+### 选择外部地图目录
 
-顶栏可随时切换数据目录：粘贴路径 + 「切换目录」、原生「导入文件夹…」对话框、或「默认」回到
-`../war-of-state/data`；选择持久化在 localStorage。目录须**同时含** units/buildings/rules.json，
-缺文件在切换时即被拒绝。保存门禁对导入目录同样生效：工具会为每个导入目录自动生成独立的
-最小 gate 沙盒工程（`map-editor/.gate-projects/<hash>/`：精简 project.godot + src 副本 +
-`--import` 类缓存；每次校验前刷新三个 json 副本，src 文件数/字节数变化自动重建）——
-保证"候选 vs 同目录其余数据"的校验语义不因目录切换而漂移。
+启动页输入的是 maps 路径，不能输入磁盘根目录或整个 Godot 工程。地图目录可为空。
+单位/建筑/规则配置从绑定工程读取；工具不会在此会话写回这些表。
+离线 maps 的资源前缀为 `res://data/maps/`，部署时应将其整个目录内容放入目标工程的
+`data/maps/`，保留 `_assets/` 结构。目录外已有工程图片仅作为只读依赖，不纳入 maps 备份。
 
 ## gate 协议（`gate/config_gate.gd`）
 

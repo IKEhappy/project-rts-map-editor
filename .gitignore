@@ -11,3 +11,7 @@ release/
 .probe-data/
 .mimosa.crash.log
 .mimosa/
+.debug-smoke/
+.probe-data/
+
+docs/

@@ -2,8 +2,8 @@ extends SceneTree
 ## map-editor 配置门禁（2026-09-14 T-164）。工程外脚本——工具代码不进 Godot 工程（用户裁定），
 ## 探针 probe_outside.gd 已验证 --script 可从工程外加载并访问 res://。
 ##
-## 校验权威 = res://src/data/match_config.gd 的 MatchConfig.validate；本脚本零独立校验逻辑，
-## 只负责：候选文件解析 → override 组装 → R1 范围检查（禁增删实体/规则键）→ 调权威校验。
+## 校验权威 = MatchConfig.validate 与 snapshot_validation.config_shape；本脚本负责
+## 候选解析、编辑器字段 schema 适配、override 组装及身份/删除边界，不另建数值规则。
 ##
 ## 用法（Electron 主进程经子进程调用）：
 ##   <godot> --headless --path war-of-state --script map-editor/gate/config_gate.gd -- lint-project
@@ -105,7 +105,7 @@ func _read_json(path: String) -> Dictionary:
 
 
 ## 候选文件 → override 字典 + R1 范围检查。
-## units/buildings：实体键集必须与当前默认表完全一致（增删实体超出 override 语义，须专项）；
+## units/buildings：既有实体禁止删除或改身份；新增实体沿用模板创建入口；
 ## 加载器必填字段（UnitDefs: id/key/hp；BuildingDefs: key/hp）缺失当场拒绝，不留到游戏启动 assert。
 func _extract_override(kind: String, candidate: Dictionary, defaults: Dictionary) -> Dictionary:
 	var errors: Array = []
@@ -156,17 +156,67 @@ func _extract_override(kind: String, candidate: Dictionary, defaults: Dictionary
 				seen_ids[int(id_variant)] = true
 		by_key[key] = row
 	var base: Dictionary = defaults.get(kind, {})
+	var schema_result: Dictionary = _feature_schema(kind, candidate)
+	errors.append_array(schema_result.get("errors", []))
+	var schema: Dictionary = schema_result.get("schema", {})
+	var validation: Script = load("res://src/data/snapshot_validation.gd")
 	# R9（2026-09-14 用户需求：模板新建实体）：新增实体放行，并入扩展 base 后走
 	# MatchConfig.validate 全量深检（identity/未知字段/数值域/tiers/lines 照常）；
-	# 删除实体仍禁止（引用完整性无手段校验）。
+	# 已有实体只扩充本次显式添加且 schema 已声明的字段，避免 MC 的逐实体键集拒绝合法 Feature。
 	var extended_base: Dictionary = base.duplicate(true)
 	for key: String in by_key:
 		if not base.has(key):
 			extended_base[key] = by_key[key]
+			continue
+		var row: Dictionary = by_key[key]
+		var base_def: Dictionary = base[key]
+		for field: String in row:
+			if base_def.has(field):
+				continue
+			if field in ["id", "key"]:
+				errors.append("identity cannot change: " + key + "." + field)
+			elif not schema.has(field):
+				errors.append("unknown key: " + kind + "." + key + "." + field)
+			else:
+				var shape_error: String = validation.config_shape(row[field], schema[field])
+				if not shape_error.is_empty():
+					errors.append("%s.%s.%s: %s" % [kind, key, field, shape_error])
+				else:
+					extended_base[key][field] = schema[field]
 	for key: String in base:
 		if not by_key.has(key):
 			errors.append("禁止删除实体：%s.%s（引用完整性无法校验）" % [kind, key])
 	return {"override": {kind: by_key}, "base": extended_base, "errors": errors}
+
+
+func _feature_schema(kind: String, candidate: Dictionary) -> Dictionary:
+	var source: Dictionary = _read_json("res://data/%s.json" % kind)
+	if not bool(source.get("ok", false)):
+		return {"schema": {}, "errors": [String(source.get("error", "cannot read source schema"))]}
+	var current: Dictionary = source.get("data", {})
+	var schema: Dictionary = {}
+	for row: Variant in current.get(kind, []):
+		if row is Dictionary:
+			_add_schema_fields(schema, row)
+	# Current data remains the type authority. Candidate templates may declare a
+	# previously unused field, but cannot change a known field's model type.
+	for document: Dictionary in [current, candidate]:
+		var templates: Variant = document.get("templates", [])
+		if not templates is Array:
+			continue
+		for template: Variant in templates:
+			if not template is Dictionary:
+				continue
+			for block: String in ["entity", "fields"]:
+				if template.get(block) is Dictionary:
+					_add_schema_fields(schema, template[block])
+	return {"schema": schema, "errors": []}
+
+
+func _add_schema_fields(schema: Dictionary, fields: Dictionary) -> void:
+	for field: String in fields:
+		if field not in ["id", "key"] and not schema.has(field):
+			schema[field] = fields[field]
 
 
 func _mc() -> GDScript:

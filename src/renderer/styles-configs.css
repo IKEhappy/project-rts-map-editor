@@ -1,0 +1,14 @@
+.configs-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 0 14px 8px; }
+.configs-panel .configs-toolbar { display: flex; align-items: center; flex-shrink: 0; flex-wrap: wrap; gap: 6px; padding: 8px 0; }
+.configs-panel .configs-toolbar .btn { display: inline-flex; align-items: center; gap: 5px; justify-content: center; border-radius: 5px; }
+.configs-panel .configs-current-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 12px ui-monospace, Consolas, monospace; color: var(--text-dim); }
+.configs-panel .configs-editor { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.configs-panel .configs-editor > .master-detail { height: 100%; }
+.configs-panel .configs-editor > .table-wrap { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+.configs-panel .configs-status { display: flex; justify-content: space-between; gap: 16px; padding-top: 6px; flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+.configs-panel .configs-status > span:last-child { min-width: 0; max-width: 65%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.configs-panel .banner { flex-shrink: 0; max-height: 150px; overflow: auto; }
+.configs-panel .entity-list, .configs-panel .detail { border-radius: 5px; }
+.configs-panel .add-field-row { flex-wrap: wrap; min-width: 0; }
+.configs-panel .add-field-row > .cell { max-width: 100%; }
+@media (max-width: 1280px) { .configs-panel .entity-list { width: 210px; } }

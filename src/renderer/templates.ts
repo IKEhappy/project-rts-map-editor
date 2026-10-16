@@ -7,6 +7,10 @@ export interface TemplateDef {
   note?: string;
   key_prefix?: string;
   entity: Entity;
+  /** FieldTree feature defaults; never copied into the runtime entity. */
+  fields?: Entity;
+  /** Optional nested fields keyed by JSON Pointer, with array indexes omitted. */
+  nested_fields?: Record<string, Entity>;
 }
 
 export function templatesOf(file: unknown): TemplateDef[] {
@@ -18,7 +22,8 @@ export function templatesOf(file: unknown): TemplateDef[] {
       tpl !== null && typeof tpl === "object" && !Array.isArray(tpl) &&
       typeof (tpl as Record<string, unknown>).key === "string" &&
       (tpl as Record<string, unknown>).entity !== null &&
-      typeof (tpl as Record<string, unknown>).entity === "object",
+      typeof (tpl as Record<string, unknown>).entity === "object" &&
+      !Array.isArray((tpl as Record<string, unknown>).entity),
   );
 }
 
@@ -44,6 +49,6 @@ export function instantiateTemplate(tpl: TemplateDef, rows: Entity[]): Entity {
     ordered[field] = entity[field];
   }
   ordered.name_cn =
-    typeof tpl.entity.name_cn === "string" ? `${tpl.entity.name_cn}${index > 1 ? index : ""}` : prefix;
+    `${typeof tpl.entity.name_cn === "string" ? tpl.entity.name_cn : typeof tpl.name_cn === "string" ? tpl.name_cn : prefix}${index > 1 ? index : ""}`;
   return ordered;
 }
