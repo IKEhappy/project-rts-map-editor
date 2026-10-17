@@ -8,6 +8,8 @@ const MAX_BYTES = 32 * 1024 * 1024;
 const MAX_PIXELS = 64 * 1024 * 1024;
 const VIEWS = ['tilt', 'topdown', 'image'];
 const PNG_SIGNATURE = Buffer.from('89504e470d0a1a0a', 'hex');
+const JPEG_SIGNATURE = Buffer.from('ffd8', 'hex');
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg'];
 
 function regularFile(root, relative) {
   if (typeof relative !== 'string' || !relative || /[\\\x00-\x1f:]/.test(relative)
@@ -51,24 +53,66 @@ function readJson(file) {
   return value;
 }
 
-function pngInfo(file, nativeImage, preview = false) {
+function jpegDimensions(bytes) {
+  if (bytes.length < 4 || !bytes.subarray(0, 2).equals(JPEG_SIGNATURE)) throw new Error('JPEG 文件头无效');
+  let offset = 2;
+  while (offset < bytes.length) {
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) break;
+    const marker = bytes[offset++];
+    if (marker === 0xd8 || marker === 0xd9) continue;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > bytes.length) break;
+    const length = bytes.readUInt16BE(offset);
+    if (length < 2 || offset + length > bytes.length) break;
+    const sof = (marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7)
+      || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf);
+    if (sof) {
+      if (length < 7) break;
+      return { width: bytes.readUInt16BE(offset + 5), height: bytes.readUInt16BE(offset + 3) };
+    }
+    offset += length;
+  }
+  throw new Error('JPEG 尺寸信息无效');
+}
+
+function imageInfo(file, nativeImage, preview = false) {
   const stat = fs.lstatSync(file);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_BYTES) throw new Error('图片必须为普通 PNG 文件且不超过 32 MiB');
+  const extension = path.extname(file).toLowerCase();
+  if (!IMAGE_EXTENSIONS.includes(extension)) throw new Error('图片仅支持 PNG、JPG 或 JPEG');
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_BYTES) throw new Error('图片必须为普通 PNG/JPG/JPEG 文件且不超过 32 MiB');
   const bytes = fs.readFileSync(file);
-  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('PNG 文件头无效');
-  const width = bytes.readUInt32BE(16);
-  const height = bytes.readUInt32BE(20);
+  let width;
+  let height;
+  if (extension === '.png') {
+    if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('PNG 文件头无效');
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else {
+    ({ width, height } = jpegDimensions(bytes));
+  }
   if (!width || !height || width > 16384 || height > 16384 || width * height > MAX_PIXELS) throw new Error('图片尺寸超限（单边 16384、总像素 64M）');
   const decoded = nativeImage.createFromBuffer(bytes);
-  if (decoded.isEmpty()) throw new Error('PNG 解码失败');
+  if (decoded.isEmpty()) throw new Error(`${extension === '.png' ? 'PNG' : 'JPEG'} 解码失败`);
   const actual = decoded.getSize();
-  if (actual.width !== width || actual.height !== height) throw new Error('PNG 尺寸不一致');
+  if (actual.width !== width || actual.height !== height) throw new Error(`${extension === '.png' ? 'PNG' : 'JPEG'} 尺寸不一致`);
   const result = { width, height, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   if (preview) {
     const ratio = Math.min(1, 2048 / width, 2048 / height);
     result.dataUrl = (ratio < 1 ? decoded.resize({ width: Math.max(1, Math.round(width * ratio)), height: Math.max(1, Math.round(height * ratio)), quality: 'good' }) : decoded).toDataURL();
   }
   return result;
+}
+
+function pngInfo(file, nativeImage, preview = false) {
+  if (path.extname(file).toLowerCase() !== '.png') throw new Error('仅支持 PNG 图片');
+  return imageInfo(file, nativeImage, preview);
+}
+
+function imageResourceFile(workspaces, id, resource) {
+  const extension = path.extname(String(resource || '')).toLowerCase();
+  if (!IMAGE_EXTENSIONS.includes(extension)) throw new Error('资源必须为 PNG、JPG 或 JPEG 路径');
+  return resourceFile(workspaces, id, resource, extension);
 }
 
 function backgroundInfo(workspaces, id, doc, nativeImage, preview = true) {
@@ -98,7 +142,7 @@ function backgroundInfo(workspaces, id, doc, nativeImage, preview = true) {
         if (typeof ref !== 'string') { result.errors.push(`background.${view} 必须为路径字符串`); continue; }
         result.background[view] = ref;
         try {
-          const info = pngInfo(resourceFile(workspaces, id, ref, '.png'), nativeImage, preview);
+          const info = imageInfo(imageResourceFile(workspaces, id, ref), nativeImage, preview);
           if (!counted.has(info.sha256)) { totalBytes += info.size; counted.add(info.sha256); }
           result.images[view] = { path: ref, ...info };
         }
@@ -119,11 +163,12 @@ function importImage(workspaces, id, { mapId, view, sourcePath }, nativeImage) {
   if (!VIEWS.includes(view)) throw new Error('未知图片视角');
   const ws = workspaces.current(id);
   const source = path.resolve(String(sourcePath || ''));
-  if (path.extname(source).toLowerCase() !== '.png') throw new Error('仅支持 PNG 图片');
+  const extension = path.extname(source).toLowerCase();
+  if (!IMAGE_EXTENSIONS.includes(extension)) throw new Error('仅支持 PNG、JPG 或 JPEG 图片');
   regularFile(path.dirname(source), path.basename(source));
-  const info = pngInfo(source, nativeImage);
+  const info = imageInfo(source, nativeImage);
   const slug = String(mapId || 'map').replace(/[^\p{L}\p{N}_-]/gu, '_').slice(0, 80) || 'map';
-  const relative = `_assets/${slug}/${view}-${info.sha256.slice(0, 20)}.png`;
+  const relative = `_assets/${slug}/${view}-${info.sha256.slice(0, 20)}${extension}`;
   const destination = workspaces.file(id, relative);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   if (!fs.existsSync(destination)) {
@@ -138,4 +183,4 @@ function importImage(workspaces, id, { mapId, view, sourcePath }, nativeImage) {
   return { ok: true, path: `${ws.resPrefix.replace(/\/?$/, '/')}${relative}`, width: info.width, height: info.height };
 }
 
-module.exports = { MAX_BYTES, VIEWS, regularFile, resourceFile, readJson, pngInfo, backgroundInfo, importImage };
+module.exports = { MAX_BYTES, VIEWS, IMAGE_EXTENSIONS, regularFile, resourceFile, imageResourceFile, readJson, imageInfo, pngInfo, backgroundInfo, importImage };

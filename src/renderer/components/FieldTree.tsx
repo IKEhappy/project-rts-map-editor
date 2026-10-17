@@ -393,7 +393,11 @@ export default function FieldTree(props: Props) {
       // lines[].unit：固定下拉（T-164 R2.2 用户改裁定）——只能选本建筑 role 组内单位，
       // 组外现存值保留为带警示的兜底选项（数据不静默丢失），不在选项内即不可选。
       // R9：原生 select 换自绘 Dropdown（根治 Windows 弹层先白后黑闪烁）
-      if (field === "unit" && path[0] === "lines" && unitSuggestions.length > 0) {
+      // Config entities use ["lines", index, "unit"], while a map JSON
+      // entity uses ["buildings", buildingIndex, "lines", index, "unit"].
+      // Match the semantic production-line segment in either tree shape so
+      // newly-added map lines receive the same editable unit picker.
+      if (field === "unit" && path.includes("lines") && unitSuggestions.length > 0) {
         const options: DropdownOption[] = unitSuggestions.map((suggestion) => ({
           value: suggestion.key,
           label: suggestion.label,

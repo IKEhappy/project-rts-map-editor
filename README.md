@@ -11,10 +11,10 @@ Electron + React + TypeScript 外置地图工具。2026-10-16 起以用户明确
 2. **每次打开目录均新建 ZIP 备份**。备份位于 Electron userData 的 `backups/<目录哈希>/`，
    不放进 maps。工具栏显示本次基线时间，悬停可查看 ZIP 路径。
 3. 左侧地图列表、中间画布、右侧属性。模式 1 保留瓦片地图编辑；模式 2 支持整图背景，
-   `topdown` / `tilt` / `image` 三个 PNG 槽位与游戏的视角回退顺序一致。
+   `topdown` / `tilt` / `image` 三个 PNG/JPG 槽位与游戏的视角回退顺序一致。
    正上方俯视可编辑 box、建筑、出生点、装饰；倾角用于只读预览。
-4. 导入 PNG 后资源复制到 maps 内 `_assets/`，地图保存标准 `res://` 引用。
-   导入地图 JSON 时一并迁移已支持的 renderer/PNG 依赖，通过 Godot 门禁后才发布地图。
+4. 导入 PNG/JPG/JPEG 后资源复制到 maps 内 `_assets/`，地图保存标准 `res://` 引用。
+   导入地图 JSON 时一并迁移已支持的 renderer/PNG/JPG 依赖，通过 Godot 门禁后才发布地图。
 5. 「目录对比」以本次打开时的磁盘字节为基线，显示新增、删除、修改及 JSON 原文对照。
    未保存编辑不计入磁盘对比。「完全恢复」会删除新增内容并恢复全部原文件和空目录，
    同时丢弃内存编辑。关闭后重新打开同一目录，会以那时的内容重新备份。
@@ -346,7 +346,7 @@ map-editor/
   src/main/main.cjs          # Electron 主进程：窗口 + IPC
   src/main/store.cjs         # 读/原子写/.bak/哈希守卫/gate 子进程/labels 读取（纯 node，可单测）
   src/main/workspace.cjs     # 显式目录会话、ZIP 基线、字节对比、完整恢复与中断恢复
-  src/main/assets.cjs        # 路径约束、PNG 解码与资源导入
+  src/main/assets.cjs        # 路径约束、PNG/JPG 解码与资源导入
   src/main/map-import.cjs    # 外部地图与 renderer 图片依赖迁移
   src/preload/preload.cjs    # contextBridge 唯一桥
   src/renderer/              # React + TS + Vite（纯 web）

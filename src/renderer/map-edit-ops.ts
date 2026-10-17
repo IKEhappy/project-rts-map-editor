@@ -109,6 +109,7 @@ export function addBox(doc: ConfigFile, x0: number, y0: number, x1: number, y1: 
 
 export interface BuildingDefLike {
   key: string;
+  name_cn?: string;
   w?: number;
   h?: number;
   hp?: number;
@@ -289,12 +290,66 @@ export function buildingDefsOf(file: unknown): BuildingDefLike[] {
     .filter((row): row is Record<string, unknown> => row !== null && typeof row === "object")
     .map((row) => ({
       key: String(row.key ?? ""),
+      name_cn: typeof row.name_cn === "string" ? row.name_cn : undefined,
       // 缺省保持 undefined（不得强转 1）——占地解析链：配置已给 > 裁定表 > 3×3
       w: Number.isInteger(row.w) && (row.w as number) >= 1 ? (row.w as number) : undefined,
       h: Number.isInteger(row.h) && (row.h as number) >= 1 ? (row.h as number) : undefined,
       hp: Number.isFinite(Number(row.hp)) ? Number(row.hp) : undefined,
     }))
     .filter((def) => def.key.length > 0);
+}
+
+/**
+ * Generate compact, unique labels for buildings drawn on the map canvas.
+ * The normal form is the first three characters of the key. If several keys
+ * share that prefix (for example turret_*), use one meaningful suffix
+ * character while keeping the final label at three characters.
+ */
+export function buildingAbbreviationsOf(defs: BuildingDefLike[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  const used = new Set<string>();
+  const groups = new Map<string, BuildingDefLike[]>();
+  for (const def of defs) {
+    const base = def.key.slice(0, 3) || "?";
+    const group = groups.get(base) ?? [];
+    group.push(def);
+    groups.set(base, group);
+  }
+
+  for (const [base, group] of groups) {
+    for (const def of group) {
+      // Unique keys use their first three characters. For collisions keep the
+      // first two characters and choose a meaningful character from the last
+      // key segment (turret_guard -> tug, turret_aa -> tua). Every label is
+      // capped at three characters so it stays inside a one-cell object.
+      const prefix = def.key.slice(0, 2) || "?";
+      const suffixSource = def.key.split("_").filter(Boolean).at(-1) ?? def.key;
+      const candidates = group.length === 1
+        ? [base]
+        : [...suffixSource, ...def.key.replace(/[^a-zA-Z0-9]/g, "")];
+      let label = "";
+      for (const char of candidates) {
+        const candidate = group.length === 1 ? base : `${prefix}${char}`.slice(0, 3);
+        if (candidate.length > 0 && !used.has(candidate)) {
+          label = candidate;
+          break;
+        }
+      }
+      if (!label) {
+        for (const char of "abcdefghijklmnopqrstuvwxyz0123456789") {
+          const candidate = `${prefix}${char}`.slice(0, 3);
+          if (!used.has(candidate)) {
+            label = candidate;
+            break;
+          }
+        }
+      }
+      label = label || base.slice(0, 3) || "?";
+      used.add(label);
+      result[def.key] = label;
+    }
+  }
+  return result;
 }
 
 /** 文件名清洗（R15）：保留中文/CJK（Windows 与 Godot 资源路径均可），仅剔除路径

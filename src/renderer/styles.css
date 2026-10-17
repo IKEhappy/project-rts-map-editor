@@ -72,6 +72,37 @@
   --warn-bg: #34291a;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f8;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: #e9edf2;
+  --bg-sunken: #e5e9ee;
+  --border: #cbd2da;
+  --border-strong: #aab4c0;
+  --border-subtle: #dde2e8;
+  --text: #1d2530;
+  --text-dim: #586575;
+  --text-mute: #8a96a4;
+  --accent: #246fc0;
+  --accent-soft: rgba(36, 111, 192, 0.12);
+  --accent-line: rgba(36, 111, 192, 0.45);
+  --accent-deep: #1e5da0;
+  --accent-grad-a: #448fd2;
+  --accent-grad-b: #3279bd;
+  --accent-grad-a-hover: #347dbf;
+  --accent-grad-b-hover: #2868a5;
+  --selected-bg: #d9e9f8;
+  --dirty: rgba(204, 145, 0, 0.11);
+  --dirty-line: rgba(170, 115, 0, 0.4);
+  --info-bg: #e7f0fb;
+  --ok-bg: #e7f6ec;
+  --err-bg: #fff0f0;
+  --warn-bg: #fff7e6;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -239,6 +270,56 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 10;
   -webkit-app-region: no-drag;
 }
+
+.theme-control {
+  position: absolute;
+  top: 5px;
+  right: 150px;
+  z-index: 12;
+  -webkit-app-region: no-drag;
+}
+
+.theme-trigger {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.theme-trigger:hover, .theme-trigger[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+.theme-menu {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  width: 148px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+}
+.theme-option {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.theme-option:hover, .theme-option.selected { background: var(--accent-soft); color: var(--accent); }
+.theme-check { margin-left: auto; }
 
 .win-btn {
   width: 46px;
@@ -462,11 +543,12 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .field-row {
   display: flex;
-  gap: 14px;
+  gap: 10px;
   align-items: flex-start;
   padding: 5px 12px;
   min-height: 36px;
   border-bottom: 1px solid var(--border-subtle);
+  min-width: 0;
 }
 
 .field-row:last-child {
@@ -552,11 +634,12 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .field-label {
-  width: 300px;
+  width: clamp(170px, 26%, 300px);
   flex-shrink: 0;
   font-size: 12px;
   line-height: 26px; /* 与控件高度一致：单行行标签与输入框基线对齐 */
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 /* markdown 风格标签：英文原字段 = 行内代码，中文注释 = 普通文本 */
@@ -629,6 +712,8 @@ input[type="search"]::-webkit-search-cancel-button {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .tree-row-box {
@@ -727,6 +812,19 @@ button.mini.add:hover:not(:disabled) {
   font-size: 12px;
   min-width: 70px;
   max-width: 320px;
+}
+
+/* Narrow drawers should wrap controls as a group instead of clipping labels
+   or inputs.  Long JSON keys remain fully available through the row tooltip. */
+.field-editor > .dropdown,
+.field-editor > .num-cell,
+.field-editor > .cell {
+  max-width: 100%;
+}
+
+.field-editor .dropdown .dd-trigger {
+  min-width: 90px;
+  max-width: min(320px, 100%);
 }
 
 .cell:focus {
@@ -848,7 +946,8 @@ button.mini.add:hover:not(:disabled) {
   /* R26：Portal 到 body + fixed 定位（inline style 提供坐标）——突破抽屉 overflow 裁剪 */
   top: auto;
   left: auto;
-  max-width: 360px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 16px));
   /* R25 用户裁定：默认显示 10 项（搜索框 30px + 10×30px = 330px），超 10 项滚动；
      48vh 上限随窗口缩小自适应收缩 */
   max-height: min(330px, 48vh);
@@ -888,9 +987,12 @@ button.mini.add:hover:not(:disabled) {
   min-height: 28px;
   box-sizing: border-box;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Keep key/name/size readable in the menu. Long labels may wrap inside
+     their option rather than being silently shortened with an ellipsis. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
 }
 
 .dd-option:hover:not(:disabled) {
@@ -905,6 +1007,25 @@ button.mini.add:hover:not(:disabled) {
 .dd-option:disabled {
   color: var(--warn);
   cursor: default;
+}
+
+/* Grouped menus (map building picker): keep each option the same height and
+   make group boundaries visible without changing the searchable flat model. */
+.dd-group {
+  flex: 0 0 auto;
+}
+.dd-group.separated {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 4px;
+}
+.dd-group-label {
+  padding: 4px 10px 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  user-select: none;
 }
 
 .cell.arr {
@@ -1030,9 +1151,43 @@ table.rules td:first-child {
 
 .maps-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 地图工具栏统一外框高度：按钮、状态芯片、下拉和工具组共享同一条
+   基线；工具组内部按钮保留紧凑方块，外层仍与其它控件等高。 */
+.maps-toolbar > .btn,
+.maps-toolbar > .chip,
+.maps-toolbar > .dropdown,
+.maps-toolbar > .cell,
+.maps-toolbar > .tool-group {
+  height: var(--control-h-lg);
+  min-height: var(--control-h-lg);
+  align-self: center;
+}
+
+.maps-toolbar > .btn,
+.maps-toolbar > .cell {
+  display: inline-flex;
+  align-items: center;
+}
+
+.maps-toolbar > .chip {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.maps-toolbar > .dropdown {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.maps-toolbar > .dropdown > .dd-trigger {
+  height: 100%;
+  min-height: 0;
 }
 
 .maps-toolbar .dropdown {
@@ -1364,11 +1519,15 @@ body {
   background: var(--bg-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
   padding: 3px;
   gap: 2px;
 }
 
 .maps-toolbar .btn.tool {
+  height: 26px;
+  min-height: 26px;
   border: 1px solid transparent;
   background: transparent;
   border-radius: var(--radius-sm);
@@ -1710,6 +1869,8 @@ body {
   align-items: center;
   gap: 4px;
   padding: 2px 0;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .add-field-row .cell.str {

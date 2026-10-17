@@ -359,8 +359,22 @@ async function editConfigSmoke({ client, fixture, check, artifacts, prefix }) {
   await click(client, "map-tool-building");
   await click(client, "map-select-building");
   await waitFor(client, "!!document.querySelector('[data-testid=map-select-building-opt-hq]')", "map building dependency options");
-  check("saved building definitions refresh map dependency cache", await evaluate(client, `document.querySelector('[data-testid=map-select-building-opt-hq]')?.innerText.includes('（${originalWidth + 1}×')`));
+  check("saved building definitions refresh map dependency cache", await evaluate(client, `document.querySelector('[data-testid=map-select-building-opt-hq]')?.innerText.includes('hq - 总部 [${originalWidth + 1}×')`));
   await click(client, "map-select-building-opt-hq");
+  // 选中列表末项后重新打开，长下拉应自动把当前选项滚入可视区。
+  await click(client, "map-select-building");
+  await waitFor(client, "!!document.querySelector('[data-testid=map-select-building-opt-super_factory]')", "map building long option");
+  await click(client, "map-select-building-opt-super_factory");
+  await click(client, "map-select-building");
+  check("building dropdown scrolls to selected option", await evaluate(client, `(() => {
+    const menu = document.querySelector('.dd-menu');
+    const option = document.querySelector('[data-testid=map-select-building-opt-super_factory]');
+    if (!menu || !option) return false;
+    const mr = menu.getBoundingClientRect();
+    const or = option.getBoundingClientRect();
+    return or.top >= mr.top - 1 && or.bottom <= mr.bottom + 1;
+  })()`));
+  await click(client, "map-select-building-opt-super_factory");
   await click(client, "map-tool-none");
   const hashes = Object.fromEntries(Object.entries(files).map(([kind, file]) => [kind, sha(fs.readFileSync(file))]));
   return { files, hashes, pendingHp: baseHp + 55 };
@@ -416,6 +430,52 @@ export async function runWorkspaceSmoke({ client, fixture, artifacts, prefix = "
   assert(!saveError, `Valid save rejected: ${saveError}`);
   const saved = await checkedApi("readMap", "legacy.json");
   check("valid save passes gate and content hash", saved.data.seed === 24680 && saved.hash === sha(fs.readFileSync(saved.path)), saved);
+
+  // 地图页右键建筑→产线回归：空产线由字段树创建后，嵌套 unit/tier/ticks
+  // 必须保持可编辑并能通过地图保存落盘。这个路径与配置表 buildings 的
+  // lines 测试不同，专门锁住地图条目内的数组写入。
+  await evaluate(client, `(() => {
+    const canvas = document.querySelector('[data-testid="map-canvas"] canvas');
+    if (!canvas) throw new Error('Map canvas missing for building context test');
+    const rect = canvas.getBoundingClientRect();
+    const ppc = parseFloat(canvas.getAttribute('data-ppc'));
+    const ox = parseFloat(canvas.getAttribute('data-ox'));
+    const oy = parseFloat(canvas.getAttribute('data-oy'));
+    const scale = rect.width / (parseFloat(canvas.getAttribute('data-css-w')) || canvas.width);
+    // p0_corridor 的第一座建筑 mine 位于 (7,6)。
+    canvas.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true,
+      clientX: rect.left + (7 - ox + 0.5) * ppc * scale,
+      clientY: rect.top + (6 - oy + 0.5) * ppc * scale,
+    }));
+    return true;
+  })()`);
+  await waitFor(client, "!!document.querySelector('[data-testid=building-ctx-menu]')", "building context menu for production line");
+  await click(client, "ctx-field-lines");
+  await waitFor(client, `!![...document.querySelectorAll('.field-row')].find((row) => row.querySelector('.field-label code')?.textContent === 'lines' && row.querySelector('button.add'))`, "map building lines field");
+  await evaluate(client, `(() => {
+    const row = [...document.querySelectorAll('.field-row')].find((candidate) => candidate.querySelector('.field-label code')?.textContent === 'lines');
+    const add = row?.querySelector('button.add');
+    if (!add) throw new Error('Map building lines add button missing');
+    add.click();
+  })()`);
+  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-unit]')", "map production line row");
+  // lines[].unit is a custom dropdown in the map field tree (the numeric
+  // fields remain regular inputs). Open it and choose the unit option rather
+  // than invoking HTMLInputElement.value on a button.
+  await click(client, "field-buildings-0-lines-0-unit");
+  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-unit-opt-cougar]')", "map production unit options");
+  await click(client, "field-buildings-0-lines-0-unit-opt-cougar");
+  await setInput(client, "field-buildings-0-lines-0-tier", "2");
+  await setInput(client, "field-buildings-0-lines-0-ticks", "90");
+  check("map production line nested fields remain editable", await evaluate(client, `
+    document.querySelector('[data-testid=field-buildings-0-lines-0-unit]')?.getAttribute('data-value') === 'cougar' &&
+    document.querySelector('[data-testid=field-buildings-0-lines-0-tier]')?.value === '2' &&
+    document.querySelector('[data-testid=field-buildings-0-lines-0-ticks]')?.value === '90'
+  `));
+  await click(client, "map-save-btn");
+  await waitFor(client, `window.meApi.readMap('legacy.json').then((result) => result.ok && result.data?.buildings?.[0]?.lines?.[0]?.unit === 'cougar' && result.data.buildings[0].lines[0].tier === 2 && result.data.buildings[0].lines[0].ticks === 90)`, "map production line save", 180000);
+  check("map production line nested fields persist after save", true);
   await click(client, "map-json-toggle");
   const configurations = await editConfigSmoke({ client, fixture, check, artifacts, prefix });
   const tilt = await checkedApi("importImage", { mapId: "whole_smoke", view: "tilt", sourcePath: fixture.tilt });

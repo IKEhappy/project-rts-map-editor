@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FolderOpen, GitCompareArrows, Minus, RotateCcw, Save, Square, X } from "lucide-react";
+import { ArrowLeft, FolderOpen, GitCompareArrows, Minus, Moon, Palette, RotateCcw, Save, Square, Sun, X } from "lucide-react";
 import { api } from "./api";
 import { canonicalJson } from "./canonical";
 import MapsPanel, { type MapsPanelHandle } from "./components/MapsPanel";
@@ -29,6 +29,11 @@ export default function App() {
   const [diffDetail, setDiffDetail] = useState<{ path: string; before: string; after: string } | null>(null);
   const [dialog, setDialog] = useState<"compare" | "restore" | "close" | null>(null);
   const [maximized, setMaximized] = useState(false);
+  const [themeChoice, setThemeChoice] = useState<"system" | "light" | "dark">(() => {
+    const saved = localStorage.getItem("me.theme");
+    return saved === "light" || saved === "dark" ? saved : "system";
+  });
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const maps = useRef<MapsPanelHandle | null>(null);
   const configs = useRef<ConfigsPanelHandle | null>(null);
   const closeRef = useRef<() => void>(() => {});
@@ -173,6 +178,34 @@ export default function App() {
     if (dirty || configs.current?.getDirtyKinds().length) setDialog("close"); else void windowControl("close-now");
   };
 
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      const resolved = themeChoice === "system" ? (media.matches ? "light" : "dark") : themeChoice;
+      document.documentElement.dataset.theme = resolved;
+    };
+    apply();
+    const listener = () => { if (themeChoice === "system") apply(); };
+    media.addEventListener?.("change", listener);
+    return () => media.removeEventListener?.("change", listener);
+  }, [themeChoice]);
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!document.querySelector("[data-testid=theme-control]")?.contains(target)) setThemeMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  const chooseTheme = (choice: "system" | "light" | "dark") => {
+    setThemeChoice(choice);
+    if (choice === "system") localStorage.removeItem("me.theme");
+    else localStorage.setItem("me.theme", choice);
+    setThemeMenuOpen(false);
+  };
+
   const saveAndClose = async () => {
     if (isWorking()) return;
     setBusy(true);
@@ -205,6 +238,14 @@ export default function App() {
       <span className="brand">Them: Pixel Front <span className="brand-sub">地图编辑器</span></span>
       <span className="file-path" title={workspace?.root}>{workspace?.root || "未打开地图目录"}</span>
     </header>
+    <div className="theme-control" data-testid="theme-control">
+      <button className="theme-trigger" data-testid="theme-trigger" title="切换主题" aria-label="切换主题" aria-expanded={themeMenuOpen} onClick={() => setThemeMenuOpen((open) => !open)}>
+        {themeChoice === "light" ? <Sun size={16} /> : themeChoice === "dark" ? <Moon size={16} /> : <Palette size={16} />}
+      </button>
+      {themeMenuOpen ? <div className="theme-menu" role="menu" data-testid="theme-menu">
+        {([["system", "跟随系统", Palette], ["light", "白天模式", Sun], ["dark", "夜间模式", Moon]] as const).map(([choice, label, Icon]) => <button key={choice} role="menuitemradio" aria-checked={themeChoice === choice} className={`theme-option${themeChoice === choice ? " selected" : ""}`} data-testid={`theme-${choice}`} onClick={() => chooseTheme(choice)}><Icon size={15} />{label}<span className="theme-check">{themeChoice === choice ? "✓" : ""}</span></button>)}
+      </div> : null}
+    </div>
     <div className="win-controls">
       <button className="win-btn" title="最小化" data-testid="win-min-btn" onClick={() => void windowControl("minimize")}><Minus size={14} /></button>
       <button className="win-btn" title={maximized ? "还原" : "最大化"} data-testid="win-max-btn" onClick={() => void windowControl("maximize")}><Square size={12} /></button>

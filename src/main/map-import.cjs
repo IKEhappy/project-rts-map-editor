@@ -146,9 +146,10 @@ function importMap({ workspaces, id, sourcePath, nativeImage, saveMap }) {
       }
       return resolve(base, safeRelative(ref, directory));
     };
-    const copyPng = (file, relative, publish, checkedInfo) => {
-      if (path.extname(file).toLowerCase() !== '.png') throw new Error('导入依赖仅支持 PNG 图片');
-      const info = checkedInfo || assets.pngInfo(file, nativeImage);
+    const copyImage = (file, relative, publish, checkedInfo) => {
+      const extension = path.extname(file).toLowerCase();
+      if (!assets.IMAGE_EXTENSIONS.includes(extension)) throw new Error('导入依赖仅支持 PNG、JPG 或 JPEG 图片');
+      const info = checkedInfo || assets.imageInfo(file, nativeImage);
       if (publish || !counted.has(info.sha256)) budget(info.size);
       counted.add(info.sha256);
       if (!publish) return;
@@ -162,11 +163,11 @@ function importMap({ workspaces, id, sourcePath, nativeImage, saveMap }) {
     const image = (ref, base, publish = true) => {
       reference();
       const file = locate(ref, base);
-      if (!publish) { copyPng(file, '', false); allowed.add(ref); return ref; }
-      const info = assets.pngInfo(file, nativeImage);
+      if (!publish) { copyImage(file, '', false); allowed.add(ref); return ref; }
+      const info = assets.imageInfo(file, nativeImage);
       if (!copied.has(info.sha256)) {
-        const relative = `${info.sha256}.png`;
-        copyPng(file, relative, true, info);
+        const relative = `${info.sha256}${path.extname(file).toLowerCase()}`;
+        copyImage(file, relative, true, info);
         copied.set(info.sha256, resource(relative));
       }
       return copied.get(info.sha256);
@@ -188,16 +189,16 @@ function importMap({ workspaces, id, sourcePath, nativeImage, saveMap }) {
           const child = relative ? `${relative}/${entry.name}` : entry.name;
           safeRelative(child);
           if (stat.isDirectory()) walk(full, child);
-          else if (stat.isFile() && entry.name.endsWith('.png.import')) continue;
-          else if (stat.isFile() && path.extname(entry.name).toLowerCase() === '.png') {
+          else if (stat.isFile() && /\.(?:png|jpe?g)\.import$/i.test(entry.name)) continue;
+          else if (stat.isFile() && assets.IMAGE_EXTENSIONS.includes(path.extname(entry.name).toLowerCase())) {
             fileCount += 1;
             if (fileCount > 100000) throw new Error('导入资源文件过多');
-            copyPng(assets.regularFile(sourceDirectory, child), `${relativeDirectory}/${child}`, publish);
-          } else throw new Error(`资源目录包含不支持的非 PNG 文件：${child}`);
+            copyImage(assets.regularFile(sourceDirectory, child), `${relativeDirectory}/${child}`, publish);
+          } else throw new Error(`资源目录包含不支持的非 PNG/JPG 文件：${child}`);
         }
       };
       walk(sourceDirectory);
-      if (!fileCount) throw new Error('资源目录不包含 PNG 图片');
+      if (!fileCount) throw new Error('资源目录不包含 PNG/JPG 图片');
       const result = publish ? `${resource(relativeDirectory)}/` : ref;
       allowed.add(result);
       directories.set(key, result);

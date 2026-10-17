@@ -239,8 +239,8 @@ export function validateMapTree(doc: Entity): Map<string, string> {
     } else {
       for (const [key, value] of Object.entries(background)) {
         if (!["tilt", "topdown", "image"].includes(key)) errors.set(`background-${key}`, `background：未知视角 ${key}`);
-        else if (typeof value !== "string") errors.set(`background-${key}`, `${key}：须为 PNG 资源路径字符串`);
-        else if (value !== "" && (!value.startsWith("res://") || !value.toLowerCase().endsWith(".png") || value.slice(6).split("/").some((part) => !part || part === "." || part === "..") || /[\\\x00-\x1f\x7f]/.test(value))) errors.set(`background-${key}`, `${key}：须为项目内 res:// PNG 资源路径`);
+        else if (typeof value !== "string") errors.set(`background-${key}`, `${key}：须为 PNG/JPG 资源路径字符串`);
+        else if (value !== "" && (!value.startsWith("res://") || !/\.(?:png|jpe?g)$/i.test(value) || value.slice(6).split("/").some((part) => !part || part === "." || part === "..") || /[\\\x00-\x1f\x7f]/.test(value))) errors.set(`background-${key}`, `${key}：须为项目内 res:// PNG/JPG 资源路径`);
       }
     }
   }

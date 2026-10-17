@@ -9,6 +9,7 @@ import {
   addSpawn,
   addTree,
   buildingDefsOf,
+  buildingAbbreviationsOf,
   deleteAt,
   footprintFor,
   moveBox,
@@ -30,6 +31,39 @@ import Dropdown from "./Dropdown";
 import FieldTree from "./FieldTree";
 import MapCanvas from "./MapCanvas";
 import BackgroundInspector from "./BackgroundInspector";
+
+/** Unit choices used by a map's buildings.lines editor.  The map document is
+ * deliberately not a unit-config document, so FieldTree cannot derive the
+ * role pool from the selected building here.  Supplying the complete unit
+ * list still makes a newly-added line immediately editable (rather than an
+ * empty, apparently locked dropdown); the configuration editor applies the
+ * narrower role-aware list when editing buildings.json itself. */
+function mapUnitSuggestions(units: Entity[] | null | undefined, labels: LabelsData) {
+  return (units ?? []).map((unit) => {
+    const key = String(unit.key ?? "");
+    const name = typeof unit.name_cn === "string" ? unit.name_cn : key;
+    const role = String(unit.role ?? "");
+    const roleLabel = labels.values?.role?.[role] ?? role;
+    return { key, label: role ? `${name}（${roleLabel}）` : name };
+  }).filter((option) => option.key.length > 0);
+}
+
+/** Map placement picker groups the definitions in the same order as the
+ * editor's visual inventory: regular structures, defensive turrets, then
+ * explicitly marked test/debug structures. The data file remains the source
+ * of truth; this is presentation metadata only. */
+function buildingGroup(key: string, name: string): "建筑" | "炮台" | "测试建筑" {
+  if (key.startsWith("turret_")) return "炮台";
+  if (name.startsWith("内测") || key.startsWith("test_") || key.startsWith("debug_")) return "测试建筑";
+  return "建筑";
+}
+
+function buildingOption(def: BuildingDefLike) {
+  const name = def.name_cn?.trim() || def.key;
+  const size = `${def.w ?? 1}×${def.h ?? 1}`;
+  const label = `${def.key} - ${name} [${size}]`;
+  return { value: def.key, label, title: label, group: buildingGroup(def.key, name) };
+}
 
 // 地图面板（T-164 R7/R8/R9）：dev-2d data/maps/*.json 编辑——左列表（含新建）/中字段树/
 // 右 2D 画布（视口化：滚轮缩放/拖动平移；直编：地形笔刷/擦除、box_mode 画框、建筑/树/
@@ -147,7 +181,7 @@ const toOptions = (pairs: Array<[string, string]>): Array<{ value: string; label
   pairs.map(([value, label]) => ({ value, label }));
 
 const TOOL_HINTS: Record<ToolState["tool"], string> = {
-  none: "预览模式：**点按已放置建筑/出生点 = 选中并切到对应模式，拖动即可移动**（Esc 取消选中）；空白处拖动平移、滚轮缩放；右键对象出调参菜单。",
+  none: "预览模式：点按已放置对象选中；**Shift+点按可多选，主键盘 1~9 批量切换队伍**（Esc 取消选中）；空白处拖动平移、滚轮缩放；右键对象出调参菜单。",
   terrain: "地形笔刷：**数字键 0~4 直切地形码**（或工具栏下拉）；画布拖矩形整块刷入，刷过已有配置即覆盖。**右键=取消工具回预览**。",
   erase: "擦除地形：拖矩形把覆盖格恢复为 default_terrain（只减补丁不新增）；数字键 0~4 可改目标码（同码=擦除）。",
   box: "画 box_mode 范围：拖矩形追加 L2 标注。**数字键 0~3 切通行维度、B 键切禁建**（或工具栏两个下拉）；新范围刷过旧范围=覆盖（旧条目保留未重叠部分）。**右键=取消工具回预览**。",
@@ -155,7 +189,7 @@ const TOOL_HINTS: Record<ToolState["tool"], string> = {
   tree: "放树：点格子放 decor 树（纯视觉不阻挡）。",
   spawn: "放出生点：点**空格**放置（单位/队伍/数量在工具栏）；**按住已有出生点拖动=移动**。",
   delete: "删除：点画布删除命中的元素——优先级建筑 → box 范围 → 树 → 出生点（后放的先删）。",
-  "move-unit": "移动·游戏单位：按住建筑/炮台/出生点单位拖动即可移动（越界/占位冲突拒绝）。**预览点击仅选中不再自动切此模式**——须手动切换防误触。",
+  "move-unit": "移动·游戏单位：按住建筑/炮台/出生点单位拖动即可移动；**Shift+点按多选后拖动可等距移动**（越界/占位冲突拒绝）。主键盘 1~9 可给悬停对象切换队伍。",
   "move-shape": "移动·地形图形：按住地形补丁或 box 范围拖动整体平移（钳图界）。补丁优先于 box。",
   "move-render": "移动·渲染内容：按住 decor 树拖动到新格。水等地面贴图属性走 render 配置文件不在画布移动。",
 };
@@ -177,6 +211,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   // R8 画布直编：工具态 + 建筑配置表（占地/血量默认来源；随工具内保存的 buildings.json 实时刷新）
   const [toolState, setToolState] = useState<ToolState>(DEFAULT_TOOL_STATE);
   const [buildingDefs, setBuildingDefs] = useState<BuildingDefLike[]>([]);
+  const buildingAbbreviations = useMemo(() => buildingAbbreviationsOf(buildingDefs), [buildingDefs]);
   // R12：JSON 字段树默认折叠（研发入口），悬浮按钮开合底层抽屉
   const [jsonOpen, setJsonOpen] = useState(false);
   // R31：底部图例/提示默认折叠——常驻三段说明在 720p 下会显著挤压画布
@@ -188,6 +223,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const [renameModal, setRenameModal] = useState<{ from: string; value: string; error?: string } | null>(null);
   // R22：选中对象（预览点按已放置对象→选中并切对应模式；拖动移动）
   const [selectedObject, setSelectedObject] = useState<{ kind: "building" | "spawn"; index: number } | null>(null);
+  const [selectedObjects, setSelectedObjects] = useState<Array<{ kind: "building" | "spawn"; index: number }>>([]);
   const [backgroundInfo, setBackgroundInfo] = useState<BackgroundInfo | null>(null);
   const [backgroundView, setBackgroundView] = useState<BackgroundView>("topdown");
   const [imageModeRequested, setImageModeRequested] = useState(false);
@@ -233,14 +269,21 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const backgroundKey = JSON.stringify([load?.doc.background, load?.doc.renderer]);
   useEffect(() => {
     let cancelled = false;
-    setBackgroundInfo(null);
-    if (load) api.backgroundInfo(load.doc).then((info) => { if (!cancelled) setBackgroundInfo(info); }).catch((error: unknown) => {
+    if (!load) {
+      setBackgroundInfo(null);
+      return () => { cancelled = true; };
+    }
+    // Keep the previous decoded background while the new metadata is being
+    // resolved. Clearing it first causes MapCanvas to paint the green terrain
+    // fallback for one frame, which is visible as a flash in whole-image mode.
+    api.backgroundInfo(load.doc).then((info) => { if (!cancelled) setBackgroundInfo(info); }).catch((error: unknown) => {
       if (!cancelled) setBackgroundInfo({ ok: false, source: "none", background: {}, images: {}, errors: [String(error)] });
     });
     return () => { cancelled = true; };
   }, [activeKey, backgroundKey, backgroundRevision, workspace.id, workspace.generation]);
   useEffect(() => {
     setSelectedObject(null);
+    setSelectedObjects([]);
     setCtxMenu(null);
     setImageModeRequested(false);
     setBackgroundView("topdown");
@@ -488,9 +531,114 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const onSelectObject = useCallback(
     (sel: { kind: "building" | "spawn"; index: number } | null) => {
       setSelectedObject(sel);
+      setSelectedObjects(sel ? [sel] : []);
     },
     [],
   );
+
+  const onSelectObjects = useCallback((sels: Array<{ kind: "building" | "spawn"; index: number }>) => {
+    setSelectedObjects(sels);
+    setSelectedObject(sels.at(-1) ?? null);
+  }, []);
+
+  /** R29：画布主键盘 1~9 给悬停建筑/炮台/单位切换队伍；仍保留右键 JSON 调参路径。 */
+  const onChangeObjectsTeam = useCallback(
+    (sels: Array<{ kind: "building" | "spawn"; index: number }>, team: number) => {
+      if (!load || !Number.isInteger(team) || team < 1 || team > 9 || sels.length === 0) return;
+      const buildings = Array.isArray(load.doc.buildings) ? [...(load.doc.buildings as Entity[])] : [];
+      const spawns = Array.isArray(load.doc.spawns) ? [...(load.doc.spawns as Entity[])] : [];
+      let changed = false;
+      for (const target of sels) {
+        const list = target.kind === "building" ? buildings : spawns;
+        const raw = list[target.index];
+        if (raw !== null && typeof raw === "object" && !Array.isArray(raw) && Number(raw.team ?? 0) !== team) {
+          list[target.index] = { ...raw, team };
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      applyDoc({ ...load.doc, buildings, spawns }, "canvas-team");
+      setSelectedObjects(sels);
+      setSelectedObject(sels.at(-1) ?? null);
+    },
+    [load, applyDoc],
+  );
+
+  const onChangeObjectTeam = useCallback(
+    (sel: { kind: "building" | "spawn"; index: number }, team: number) => onChangeObjectsTeam(selectedObjects.length > 0 ? selectedObjects : [sel], team),
+    [onChangeObjectsTeam, selectedObjects],
+  );
+
+  const onMoveObjects = useCallback((moves: Array<{ kind: "building" | "spawn"; index: number; x: number; y: number }>) => {
+    if (!load || moves.length === 0) return;
+    const width = Number(load.doc.width ?? 0);
+    const height = Number(load.doc.height ?? 0);
+    const buildings = Array.isArray(load.doc.buildings) ? [...(load.doc.buildings as Entity[])] : [];
+    const spawns = Array.isArray(load.doc.spawns) ? [...(load.doc.spawns as Entity[])] : [];
+    const fail = (message: string) => setSaveState({ tone: "rejected", code: "usage", errors: [`批量移动拒绝：${message}`] });
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+      fail("地图尺寸无效");
+      return;
+    }
+    const seen = new Set<string>();
+    for (const move of moves) {
+      if ((move.kind !== "building" && move.kind !== "spawn") || !Number.isInteger(move.index) || move.index < 0 || !Number.isFinite(move.x) || !Number.isFinite(move.y)) {
+        fail("对象索引或坐标无效");
+        return;
+      }
+      const identity = `${move.kind}:${move.index}`;
+      if (seen.has(identity)) {
+        fail("同一对象被重复提交");
+        return;
+      }
+      seen.add(identity);
+      const list = move.kind === "building" ? buildings : spawns;
+      const raw = list[move.index];
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        fail("对象已不存在");
+        return;
+      }
+    }
+    const moved = moves.some((move) => {
+      const original = move.kind === "building" ? load.doc.buildings : load.doc.spawns;
+      const raw = Array.isArray(original) ? original[move.index] : null;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+      const row = raw as Entity;
+      return Number(row.x) !== Math.round(move.x) || Number(row.y) !== Math.round(move.y);
+    });
+    // 原地松手不落历史，避免 Shift 选中后未拖动产生无意义脏标记。
+    if (!moved) return;
+    for (const move of moves) {
+      const list = move.kind === "building" ? buildings : spawns;
+      const raw = list[move.index];
+      list[move.index] = { ...raw, x: Math.round(move.x), y: Math.round(move.y) };
+    }
+    for (let i = 0; i < buildings.length; i += 1) {
+      const a = buildings[i];
+      if (!a || typeof a !== "object" || Array.isArray(a)) continue;
+      const ax = Number(a.x); const ay = Number(a.y); const aw = Math.max(1, Number(a.w ?? 1)); const ah = Math.max(1, Number(a.h ?? 1));
+      if (![ax, ay, aw, ah].every(Number.isFinite) || ax < 0 || ay < 0 || ax + aw > width || ay + ah > height) { fail(`建筑 ${String(a.key ?? "?")} 越界`); return; }
+      for (let j = i + 1; j < buildings.length; j += 1) {
+        const b = buildings[j]; if (!b || typeof b !== "object" || Array.isArray(b)) continue;
+        const bx = Number(b.x); const by = Number(b.y); const bw = Math.max(1, Number(b.w ?? 1)); const bh = Math.max(1, Number(b.h ?? 1));
+        if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) { fail(`建筑 ${String(a.key ?? "?")} 与 ${String(b.key ?? "?")} 占位重叠`); return; }
+      }
+      for (const sp of spawns) {
+        if (!sp || typeof sp !== "object" || Array.isArray(sp)) continue;
+        const sx = Number(sp.x); const sy = Number(sp.y);
+        if (sx >= ax && sy >= ay && sx < ax + aw && sy < ay + ah) { fail(`出生点（${sx},${sy}）落在建筑 ${String(a.key ?? "?")} 内`); return; }
+      }
+    }
+    for (let i = 0; i < spawns.length; i += 1) {
+      const a = spawns[i]; if (!a || typeof a !== "object" || Array.isArray(a)) continue;
+      const ax = Number(a.x); const ay = Number(a.y);
+      if (![ax, ay].every(Number.isFinite) || ax < 0 || ay < 0 || ax >= width || ay >= height) { fail(`出生点（${ax},${ay}）越界`); return; }
+      for (let j = i + 1; j < spawns.length; j += 1) {
+        const b = spawns[j]; if (b && typeof b === "object" && !Array.isArray(b) && Number(b.x) === ax && Number(b.y) === ay) { fail(`出生点（${ax},${ay}）重复`); return; }
+      }
+    }
+    applyDoc({ ...load.doc, buildings, spawns }, "canvas-move-batch");
+  }, [load, applyDoc]);
 
   /** R28：移动对象松手——单位类走边界/占位校验；图形/渲染类直接应用（均已钳图界） */
   const onMoveObject = useCallback(
@@ -583,10 +731,16 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
 
   // 文档变更后选中索引越界即清（删除对象等场景）
   useEffect(() => {
-    if (!selectedObject) return;
-    const arr = selectedObject.kind === "building" ? load?.doc.buildings : load?.doc.spawns;
-    if (!Array.isArray(arr) || selectedObject.index >= arr.length) setSelectedObject(null);
-  }, [load, selectedObject]);
+    const valid = selectedObjects.filter((sel) => {
+      const list = sel.kind === "building" ? load?.doc.buildings : load?.doc.spawns;
+      return Array.isArray(list) && sel.index >= 0 && sel.index < list.length;
+    });
+    if (valid.length !== selectedObjects.length) setSelectedObjects(valid);
+    const activeIsValid = selectedObject
+      && valid.some((sel) => sel.kind === selectedObject.kind && sel.index === selectedObject.index);
+    const nextActive = activeIsValid ? selectedObject : (valid.at(-1) ?? null);
+    if (nextActive?.kind !== selectedObject?.kind || nextActive?.index !== selectedObject?.index) setSelectedObject(nextActive);
+  }, [load, selectedObject, selectedObjects]);
 
   /** R20：占位冲突检测——建筑/单位/炮台任意两者不得重合（开局触发召唤物点位=允许覆盖，
    *  不在任何占位表中，天然可放）。返回 null=可放，否则返回冲突描述。 */
@@ -972,6 +1126,11 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     return load.original as Entity;
   }, [load]);
 
+  const lineUnitSuggestions = useMemo(
+    () => mapUnitSuggestions(unitsCache, labelsData),
+    [unitsCache, labelsData],
+  );
+
   const fileNames = useMemo(() => new Set(Object.keys(docs)), [docs]);
 
   return (
@@ -1054,7 +1213,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
         ) : null}
         {toolState.tool === "building" ? (
           <>
-            <Dropdown value={String(toolState.buildingKey)} options={buildingDefs.map((d) => ({ value: d.key, label: `${d.key}（${d.w}×${d.h}）` }))} onChange={(v) => setToolState((prev) => ({ ...prev, buildingKey: v }))} testId="map-select-building" />
+            <Dropdown value={String(toolState.buildingKey)} options={buildingDefs.map(buildingOption)} onChange={(v) => setToolState((prev) => ({ ...prev, buildingKey: v }))} testId="map-select-building" />
             <Dropdown value={String(toolState.team)} options={toOptions(TEAM_OPTIONS)} onChange={(v) => setToolState((prev) => ({ ...prev, team: Number(v) }))} testId="map-select-team" />
           </>
         ) : null}
@@ -1170,8 +1329,14 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
             onEntityContext={onEntityContext}
             onToolCancel={onToolCancel}
             selected={selectedObject}
+            selectedObjects={selectedObjects}
+            buildingAbbreviations={buildingAbbreviations}
             onSelectObject={onSelectObject}
+            onSelectObjects={onSelectObjects}
+            onChangeObjectTeam={onChangeObjectTeam}
+            onChangeObjectsTeam={onChangeObjectsTeam}
             onMoveObject={onMoveObject}
+            onMoveObjects={onMoveObjects}
             overlayBar={
               <>
                 <button
@@ -1226,7 +1391,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
                     original={original}
                     labels={labelsData}
                     lightErrors={lightErrors}
-                    unitSuggestions={[]}
+                    unitSuggestions={lineUnitSuggestions}
                     onChange={updateDoc}
                   />
                 ) : (

@@ -20,6 +20,10 @@ function png(marker = 0, padding = 0) {
   return bytes;
 }
 
+function jpeg(width = 2, height = 3) {
+  return Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, height, 0, width, 3, 1, 17, 0, 0, 0xff, 0xd9]);
+}
+
 const nativeImage = { createFromBuffer: () => ({ isEmpty: () => false, getSize: () => ({ width: 2, height: 3 }) }) };
 
 function fixture(t) {
@@ -69,6 +73,17 @@ test('imports relative dual-view images, preserves map semantics and chooses a f
   assert.deepEqual(fs.readFileSync(f.readResource(payload.data.background.tilt)), png(1));
   assert.deepEqual(fs.readFileSync(f.readResource(payload.data.background.topdown)), png(2));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.maps, 'my.map.json'))), { original: true });
+});
+
+test('imports JPG background dependencies and keeps the JPG extension in the package', (t) => {
+  const f = fixture(t);
+  f.write(f.source, 'background.jpeg', jpeg());
+  const source = f.write(f.source, 'jpg-map.json', { width: 10, height: 12, background: { image: 'background.jpeg' } });
+  const result = f.run(source);
+  assert.equal(result.ok, true, result.errors?.join('\n'));
+  const ref = f.captured().data.background.image;
+  assert.match(ref, /\.jpeg$/);
+  assert.deepEqual(fs.readFileSync(f.readResource(ref)), jpeg());
 });
 
 test('migrates renderer closure including background, material PNG directories and scatter PNG variants', (t) => {

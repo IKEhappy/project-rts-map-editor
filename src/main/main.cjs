@@ -155,7 +155,7 @@ function registerIpc() {
     try {
       const id = payload?.workspaceId;
       withWorkspace(id);
-      const sourcePath = payload.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: 'PNG', extensions: ['png'] }], title: '导入整图 PNG' });
+      const sourcePath = payload.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }], title: '导入整图 PNG / JPG' });
       if (!sourcePath) return { ok: false, error: '已取消导入' };
       withWorkspace(id);
       return assets.importImage(workspaces, id, { ...payload, sourcePath }, nativeImage);

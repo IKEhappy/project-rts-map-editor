@@ -49,10 +49,18 @@ interface Props {
   overlayBar?: ReactNode;
   /** R22：当前选中对象（建筑/出生点），静态层高亮 */
   selected?: { kind: "building" | "spawn"; index: number } | null;
+  selectedObjects?: Array<{ kind: "building" | "spawn"; index: number }>;
+  /** 建筑 key 到画布短标识；缺省回退为 key 前三个字符。 */
+  buildingAbbreviations?: Record<string, string>;
   /** R22：预览模式点按已放置对象 → 选中（面板负责切换对应模式） */
   onSelectObject?(sel: { kind: "building" | "spawn"; index: number } | null): void;
+  onSelectObjects?(sels: Array<{ kind: "building" | "spawn"; index: number }>): void;
+  /** R29：预览/单位移动模式下，键盘主键盘 1~9 给悬停对象切换队伍。 */
+  onChangeObjectTeam?(sel: { kind: "building" | "spawn"; index: number }, team: number): void;
+  onChangeObjectsTeam?(sels: Array<{ kind: "building" | "spawn"; index: number }>, team: number): void;
   /** R28：拖动移动对象松手（建筑/出生点给新锚点；补丁/box 给位移 delta；decor 给新格） */
   onMoveObject?(kind: "building" | "spawn" | "patch" | "box" | "decor", index: number, x: number, y: number): void;
+  onMoveObjects?(moves: Array<{ kind: "building" | "spawn"; index: number; x: number; y: number }>): void;
 }
 
 interface HoverInfo {
@@ -79,7 +87,7 @@ function clampView(value: number, dim: number, visible: number): number {
   return Math.max(-8, Math.min(dim + 8 - Math.max(1, visible), value));
 }
 
-export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topdown", readOnly = false, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, onSelectObject, onMoveObject }: Props) {
+export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topdown", readOnly = false, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, selectedObjects, buildingAbbreviations, onSelectObject, onSelectObjects, onChangeObjectTeam, onChangeObjectsTeam, onMoveObject, onMoveObjects }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
@@ -88,14 +96,24 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [staticTick, setStaticTick] = useState(0);
   const [backgroundImage, setBackgroundImage] = useState<{ src: string; image: HTMLImageElement } | null>(null);
+  const [backgroundLoadError, setBackgroundLoadError] = useState<string | null>(null);
   const projectionY = projection === "tilt" ? 0.75 : 1;
-  const image = backgroundImage && backgroundImage.src === backgroundUrl ? backgroundImage.image : null;
+  // Keep the last decoded image visible while a replacement data URL is
+  // loading. Clearing it here exposes the green terrain fallback for one
+  // paint frame whenever the background info is refreshed.
+  const image = backgroundImage && backgroundUrl && backgroundUrl !== backgroundLoadError ? backgroundImage.image : null;
   useEffect(() => {
     if (!backgroundUrl) return;
     let cancelled = false;
+    setBackgroundLoadError(null);
     const next = new Image();
-    next.onload = () => { if (!cancelled) setBackgroundImage({ src: backgroundUrl, image: next }); };
-    next.onerror = () => { if (!cancelled) setBackgroundImage(null); };
+    next.onload = () => {
+      if (!cancelled) {
+        setBackgroundLoadError(null);
+        setBackgroundImage({ src: backgroundUrl, image: next });
+      }
+    };
+    next.onerror = () => { if (!cancelled) setBackgroundLoadError(backgroundUrl); };
     next.src = backgroundUrl;
     return () => { cancelled = true; };
   }, [backgroundUrl]);
@@ -113,8 +131,20 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   const dragRef = useRef<DragState>(null);
   const [dragPreview, setDragPreview] = useState<DragState>(null);
   // R22 对象拖动：抓取偏移保留（grabDX/Y = 按下格 - 对象锚点），目标锚点 = 当前格 - 偏移
-  const objectDragRef = useRef<{ kind: "building" | "spawn" | "patch" | "box" | "decor"; index: number; grabDX: number; grabDY: number; x: number; y: number; w: number; h: number } | null>(null);
-  const [objectGhost, setObjectGhost] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const objectDragRef = useRef<{
+    kind: "building" | "spawn" | "patch" | "box" | "decor";
+    index: number;
+    grabDX: number;
+    grabDY: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    originX?: number;
+    originY?: number;
+    members?: Array<{ kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number }>;
+  } | null>(null);
+  const [objectGhost, setObjectGhost] = useState<Array<{ x: number; y: number; w: number; h: number }> | null>(null);
   const panRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
 
   const mapW = typeof doc?.width === "number" && Number.isFinite(doc.width) && doc.width >= 1 ? Math.floor(Math.min(doc.width, 512)) : 0;
@@ -264,32 +294,23 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     ctx.lineWidth = 1.5;
     ctx.strokeRect(sx(0), sy(0), mapW * ppc, mapH * ppc);
     // R22：选中对象高亮（建筑=加粗光圈描边；出生点=光圈菱形）
-    if (selected && doc) {
+    const selections = selectedObjects ?? (selected ? [selected] : []);
+    if (selections.length > 0 && doc) {
       ctx.save();
       ctx.strokeStyle = "#5aabff";
       ctx.lineWidth = Math.max(2, ppc * 0.09);
-      if (selected.kind === "building" && Array.isArray(doc.buildings)) {
-        const raw = (doc.buildings as Array<Record<string, JsonValue>>)[selected.index];
-        if (raw && typeof raw === "object") {
-          const bx = Number(raw.x);
-          const by = Number(raw.y);
-          const bw = Math.max(1, Number(raw.w ?? 1));
-          const bh = Math.max(1, Number(raw.h ?? 1));
-          ctx.strokeRect(sx(bx) - 2, sy(by) - 2, bw * ppc + 4, bh * ppc + 4);
-        }
-      } else if (selected.kind === "spawn" && Array.isArray(doc.spawns)) {
-        const raw = (doc.spawns as Array<Record<string, JsonValue>>)[selected.index];
-        if (raw && typeof raw === "object") {
-          const px2 = sx(Number(raw.x) + 0.5);
-          const py2 = sy(Number(raw.y) + 0.5);
-          const r = Math.max(5, ppc * 0.62);
-          ctx.beginPath();
-          ctx.moveTo(px2, py2 - r);
-          ctx.lineTo(px2 + r, py2);
-          ctx.lineTo(px2, py2 + r);
-          ctx.lineTo(px2 - r, py2);
-          ctx.closePath();
-          ctx.stroke();
+      for (const selection of selections) {
+        if (selection.kind === "building" && Array.isArray(doc.buildings)) {
+          const raw = (doc.buildings as Array<Record<string, JsonValue>>)[selection.index];
+          if (raw && typeof raw === "object") ctx.strokeRect(sx(Number(raw.x)) - 2, sy(Number(raw.y)) - 2, Math.max(1, Number(raw.w ?? 1)) * ppc + 4, Math.max(1, Number(raw.h ?? 1)) * ppc + 4);
+        } else if (selection.kind === "spawn" && Array.isArray(doc.spawns)) {
+          const raw = (doc.spawns as Array<Record<string, JsonValue>>)[selection.index];
+          if (raw && typeof raw === "object") {
+            const px2 = sx(Number(raw.x) + 0.5);
+            const py2 = sy(Number(raw.y) + 0.5);
+            const r = Math.max(5, ppc * 0.62);
+            ctx.beginPath(); ctx.moveTo(px2, py2 - r); ctx.lineTo(px2 + r, py2); ctx.lineTo(px2, py2 + r); ctx.lineTo(px2 - r, py2); ctx.closePath(); ctx.stroke();
+          }
         }
       }
       ctx.restore();
@@ -309,7 +330,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       }
     }
     if (doc && Array.isArray(doc.buildings)) {
-      ctx.font = `bold ${Math.max(8, ppc - 2)}px sans-serif`;
+      const abbreviations = buildingAbbreviations ?? {};
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       for (const entry of doc.buildings) {
@@ -329,7 +350,15 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         ctx.lineWidth = Math.max(1, ppc * 0.06);
         ctx.strokeRect(sx(x) + 0.75, sy(y) + 0.75, w * ppc - 1.5, h * ppc - 1.5);
         if (ppc >= 12) {
-          const key = typeof b.key === "string" ? b.key.slice(0, 2) : "?";
+          const rawKey = typeof b.key === "string" ? b.key : "";
+          const key = abbreviations[rawKey] ?? (rawKey.slice(0, 3) || "?");
+          const baseFont = Math.min(10, Math.max(6, ppc * 0.56));
+          ctx.font = `bold ${baseFont}px sans-serif`;
+          const available = Math.max(4, Math.min(w, h) * ppc - 2);
+          const measured = ctx.measureText(key).width;
+          if (measured > available) {
+            ctx.font = `bold ${Math.max(5, baseFont * available / measured)}px sans-serif`;
+          }
           ctx.fillStyle = "#ffffff";
           ctx.fillText(key, sx(x + w / 2), sy(y + h / 2));
         }
@@ -423,7 +452,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         }
       }
     }
-  }, [doc, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, selected, dpr, image, projectionY]);
+  }, [doc, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, selected, selectedObjects, dpr, image, projectionY, buildingAbbreviations]);
 
   // R31：静态层重建只随「真正影响它的输入」发生。旧版把 rebuildStatic 的 useCallback 直接
   // 喂给 effect 依赖数组，而该回调依赖整份组件闭包——hover/dragPreview/objectGhost 任何一次
@@ -432,8 +461,8 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   const staticDeps = [
     doc, mapW, mapH, size.w, size.h, dpr,
     viewport.ox, viewport.oy, ppc,
-    terrainAt, iconTick, image, projectionY,
-    selected?.kind, selected?.index,
+    terrainAt, iconTick, image, projectionY, buildingAbbreviations,
+    selected?.kind, selected?.index, selectedObjects,
   ];
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -486,11 +515,11 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     if (objectGhost) {
       // R22：移动幽灵——半透明填充 + 光圈描边（松手生效前预览新位置）
       ctx.fillStyle = "rgba(90, 171, 255, 0.22)";
-      ctx.fillRect(sx(objectGhost.x), sy(objectGhost.y), objectGhost.w * ppc, objectGhost.h * ppc);
+      for (const ghost of objectGhost) ctx.fillRect(sx(ghost.x), sy(ghost.y), ghost.w * ppc, ghost.h * ppc);
       ctx.strokeStyle = "#5aabff";
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 4]);
-      ctx.strokeRect(sx(objectGhost.x) + 1, sy(objectGhost.y) + 1, objectGhost.w * ppc - 2, objectGhost.h * ppc - 2);
+      for (const ghost of objectGhost) ctx.strokeRect(sx(ghost.x) + 1, sy(ghost.y) + 1, ghost.w * ppc - 2, ghost.h * ppc - 2);
       ctx.setLineDash([]);
     }
     if (dragPreview) {
@@ -542,6 +571,60 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     window.addEventListener("resize", read);
     return () => window.removeEventListener("resize", read);
   }, []);
+
+  // R29：对象悬停快捷换队。只接管主键盘 Digit1~Digit9（event.code 明确排除
+  // 小键盘 Numpad1~Numpad9），且仅在预览/单位移动模式生效；输入控件聚焦时不抢键。
+  // 这里重复一段轻量命中逻辑而不依赖 hitObject：hitObject 位于画布的条件 return
+  // 之后，直接引用会让无地图状态下的 hook/闭包顺序变得脆弱。
+  useEffect(() => {
+    if (readOnly || (tool.tool !== "none" && tool.tool !== "move-unit")) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (!/^Digit[1-9]$/.test(event.code)) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (!doc || (!hover && (!selectedObjects || selectedObjects.length < 2)) || (!onChangeObjectTeam && !onChangeObjectsTeam)) return;
+      const cell = hover;
+      let hit: { kind: "building" | "spawn"; index: number } | null = null;
+      if (cell && Array.isArray(doc.buildings)) {
+        for (let i = doc.buildings.length - 1; i >= 0; i -= 1) {
+          const raw = doc.buildings[i];
+          if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+          const b = raw as Record<string, JsonValue>;
+          const x = Number(b.x);
+          const y = Number(b.y);
+          const w = Math.max(1, Number(b.w ?? 1));
+          const h = Math.max(1, Number(b.h ?? 1));
+          if (Number.isFinite(x) && Number.isFinite(y) && cell.x >= x && cell.y >= y && cell.x < x + w && cell.y < y + h) {
+            hit = { kind: "building", index: i };
+            break;
+          }
+        }
+      }
+      if (!hit && cell && Array.isArray(doc.spawns)) {
+        for (let i = doc.spawns.length - 1; i >= 0; i -= 1) {
+          const raw = doc.spawns[i];
+          if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+          const s = raw as Record<string, JsonValue>;
+          if (Number(s.x) === cell.x && Number(s.y) === cell.y) {
+            hit = { kind: "spawn", index: i };
+            break;
+          }
+        }
+      }
+      // A single stale selection must not steal the shortcut from the object
+      // currently under the cursor.  Only an explicit Shift multi-selection
+      // is treated as a batch; otherwise the hover hit is authoritative.
+      const targets = selectedObjects && selectedObjects.length > 1 ? selectedObjects : (hit ? [hit] : []);
+      if (targets.length === 0) return;
+      if (onChangeObjectsTeam) onChangeObjectsTeam(targets, Number(event.key));
+      else for (const targetItem of targets) onChangeObjectTeam?.(targetItem, Number(event.key));
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [doc, hover, onChangeObjectTeam, onChangeObjectsTeam, readOnly, selectedObjects, tool.tool]);
 
   if (!doc || mapW === 0 || mapH === 0) {
     return <div className="map-canvas empty">（缺 width/height，无法预览）</div>;
@@ -653,7 +736,41 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   /** R22：开始对象拖动（抓取偏移保留） */
   const beginObjectDrag = (hit: { kind: "building" | "spawn" | "patch" | "box" | "decor"; index: number; x: number; y: number; w: number; h: number }, cell: { x: number; y: number }) => {
     objectDragRef.current = { kind: hit.kind, index: hit.index, grabDX: cell.x - hit.x, grabDY: cell.y - hit.y, x: hit.x, y: hit.y, w: hit.w, h: hit.h };
-    setObjectGhost({ x: hit.x, y: hit.y, w: hit.w, h: hit.h });
+    setObjectGhost([{ x: hit.x, y: hit.y, w: hit.w, h: hit.h }]);
+  };
+
+  /** Resolve the current object selection to immutable drag members.  Keeping
+   * this in the canvas means the anchor and every selected object use the same
+   * snapshot from the mouse-down event; later React renders cannot change the
+   * relative offsets during a drag. */
+  const selectedDragMembers = (selections: Array<{ kind: "building" | "spawn"; index: number }>) => {
+    const buildings = Array.isArray(doc.buildings) ? doc.buildings as Array<JsonValue> : [];
+    const spawns = Array.isArray(doc.spawns) ? doc.spawns as Array<JsonValue> : [];
+    return selections.map((item) => {
+      const source = item.kind === "building" ? buildings[item.index] : spawns[item.index];
+      if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+      const row = source as Record<string, JsonValue>;
+      const x = Number(row.x); const y = Number(row.y);
+      const w = Number(row.w ?? 1); const h = Number(row.h ?? 1);
+      if (![x, y, w, h].every(Number.isFinite) || w < 1 || h < 1) return null;
+      return { ...item, x, y, w, h };
+    }).filter((item): item is { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number } => item !== null);
+  };
+
+  const beginSelectedDrag = (hit: { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number }, cell: { x: number; y: number }, selections: Array<{ kind: "building" | "spawn"; index: number }>) => {
+    const members = selectedDragMembers(selections);
+    const anchor = members.find((item) => item.kind === hit.kind && item.index === hit.index);
+    if (!anchor) return false;
+    beginObjectDrag({ ...hit, x: anchor.x, y: anchor.y, w: anchor.w, h: anchor.h }, cell);
+    objectDragRef.current = {
+      ...objectDragRef.current!,
+      members,
+      originX: anchor.x,
+      originY: anchor.y,
+      grabDX: cell.x - anchor.x,
+      grabDY: cell.y - anchor.y,
+    };
+    return true;
   };
 
   const onDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -680,8 +797,29 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const cell = localCell(event.clientX, event.clientY);
       const hit = cell ? hitMovable(cell) : null;
       if (hit && cell) {
-        onSelectObject?.(hit.kind === "building" || hit.kind === "spawn" ? { kind: hit.kind, index: hit.index } : null);
-        beginObjectDrag(hit, cell);
+        const nextSelection = hit.kind === "building" || hit.kind === "spawn" ? { kind: hit.kind, index: hit.index } : null;
+        const current = selectedObjects ?? [];
+        if (nextSelection && event.shiftKey) {
+          const objectHit = hit as { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number };
+          const exists = current.some((item) => item.kind === nextSelection.kind && item.index === nextSelection.index);
+          const next = exists ? current.filter((item) => item.kind !== nextSelection.kind || item.index !== nextSelection.index) : [...current, nextSelection];
+          onSelectObjects?.(next);
+          if (tool.tool === "move-unit" && next.length > 0) beginSelectedDrag(objectHit, cell, next);
+        } else {
+          const keepBatch = tool.tool === "move-unit" && nextSelection !== null && current.length > 1
+            && current.some((item) => item.kind === nextSelection.kind && item.index === nextSelection.index);
+          const dragSelections = keepBatch ? current : (nextSelection ? [nextSelection] : []);
+          if (!keepBatch) {
+            onSelectObjects?.(nextSelection ? [nextSelection] : []);
+            onSelectObject?.(nextSelection);
+          } else if (nextSelection) {
+            // Keep the whole selection for the drag, while making the object
+            // under the cursor the active row in the property tree.
+            onSelectObjects?.([...current.filter((item) => item.kind !== nextSelection.kind || item.index !== nextSelection.index), nextSelection]);
+          }
+          if (keepBatch && nextSelection) beginSelectedDrag(hit as { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number }, cell, dragSelections);
+          else beginObjectDrag(hit, cell);
+        }
         event.preventDefault();
         return;
       }
@@ -690,7 +828,15 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const cell = localCell(event.clientX, event.clientY);
       const hit = cell ? hitObject(cell) : null;
       if (hit && cell) {
-        onSelectObject?.({ kind: hit.kind, index: hit.index });
+        const next = { kind: hit.kind, index: hit.index } as { kind: "building" | "spawn"; index: number };
+        if (event.shiftKey && selectedObjects) {
+          const exists = selectedObjects.some((item) => item.kind === next.kind && item.index === next.index);
+          const nextSelection = exists ? selectedObjects.filter((item) => item.kind !== next.kind || item.index !== next.index) : [...selectedObjects, next];
+          onSelectObjects?.(nextSelection);
+        } else {
+          onSelectObjects?.([next]);
+          onSelectObject?.(next);
+        }
         // R28 裁定：预览点击仅选中+高亮，不再切 building/spawn 也不进拖动
         event.preventDefault();
         return;
@@ -729,11 +875,39 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const raw0 = rawCell(event.clientX, event.clientY);
       if (raw0) {
         const drag = objectDragRef.current;
-        const tx = Math.max(0, Math.min(mapW - drag.w, raw0.x - drag.grabDX));
-        const ty = Math.max(0, Math.min(mapH - drag.h, raw0.y - drag.grabDY));
+        let tx: number;
+        let ty: number;
+        if (drag.members && drag.members.length > 0) {
+          // Clamp the translation of the whole selection, rather than only
+          // clamping its anchor.  This keeps every member in the map even when
+          // the selected objects have different footprints.
+          const originX = drag.originX ?? drag.x;
+          const originY = drag.originY ?? drag.y;
+          const minX = Math.min(...drag.members.map((member) => member.x));
+          const minY = Math.min(...drag.members.map((member) => member.y));
+          const maxX = Math.max(...drag.members.map((member) => member.x + member.w));
+          const maxY = Math.max(...drag.members.map((member) => member.y + member.h));
+          const wantedDx = raw0.x - drag.grabDX - originX;
+          const wantedDy = raw0.y - drag.grabDY - originY;
+          const dx = Math.max(-minX, Math.min(mapW - maxX, wantedDx));
+          const dy = Math.max(-minY, Math.min(mapH - maxY, wantedDy));
+          tx = originX + dx;
+          ty = originY + dy;
+        } else {
+          tx = Math.max(0, Math.min(mapW - drag.w, raw0.x - drag.grabDX));
+          ty = Math.max(0, Math.min(mapH - drag.h, raw0.y - drag.grabDY));
+        }
         if (drag.x !== tx || drag.y !== ty) {
           objectDragRef.current = { ...drag, x: tx, y: ty };
-          setObjectGhost({ x: tx, y: ty, w: drag.w, h: drag.h });
+          if (drag.members && drag.members.length > 0) {
+            const dx = tx - (drag.originX ?? drag.x);
+            const dy = ty - (drag.originY ?? drag.y);
+            setObjectGhost(drag.members.map((member) => ({ x: member.x + dx, y: member.y + dy, w: member.w, h: member.h })));
+          } else {
+            const dx = tx - drag.x;
+            const dy = ty - drag.y;
+            setObjectGhost([{ x: drag.x + dx, y: drag.y + dy, w: drag.w, h: drag.h }]);
+          }
         }
       }
       return;
@@ -773,7 +947,8 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const drag = objectDragRef.current;
       objectDragRef.current = null;
       setObjectGhost(null);
-      onMoveObject?.(drag.kind, drag.index, drag.x, drag.y);
+      if (drag.members && onMoveObjects) onMoveObjects(drag.members.map((member) => ({ kind: member.kind, index: member.index, x: member.x + drag.x - (drag.originX ?? drag.x), y: member.y + drag.y - (drag.originY ?? drag.y) })));
+      else onMoveObject?.(drag.kind, drag.index, drag.x, drag.y);
       return;
     }
     const cell = localCell(event.clientX, event.clientY);

@@ -48,7 +48,7 @@ export default function BackgroundInspector({ doc, info, view, busy, imageMode, 
             const image = info?.images[slot];
             return (
               <div className="map-background-slot" key={slot}>
-                <div className="map-slot-head"><span>{label}</span><button type="button" className="map-icon-button" data-testid={`map-import-${slot}`} title={`导入${label} PNG`} aria-label={`导入${label} PNG`} disabled={busy} onClick={() => onImport(slot)}><ImagePlus size={16} /></button></div>
+                <div className="map-slot-head"><span>{label}</span><button type="button" className="map-icon-button" data-testid={`map-import-${slot}`} title={`导入${label} PNG / JPG`} aria-label={`导入${label} PNG / JPG`} disabled={busy} onClick={() => onImport(slot)}><ImagePlus size={16} /></button></div>
                 <div className="map-resource-path" title={info?.background[slot]}>{info?.background[slot] || "未指定"}</div>
                 {image?.width && image.height ? <span className="map-resource-size">{image.width} × {image.height} px</span> : null}
                 {image?.error ? <div className="map-inline-error">{image.error}</div> : null}

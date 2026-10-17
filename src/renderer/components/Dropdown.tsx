@@ -5,6 +5,9 @@ export interface DropdownOption {
   value: string;
   label: string;
   title?: string;
+  /** Optional visual group. Groups are separated in the menu while search
+   * continues to operate over the complete option list. */
+  group?: string;
 }
 
 interface Props {
@@ -88,6 +91,37 @@ export default function Dropdown(props: Props) {
       })
     : options;
 
+  // Portal 菜单本身是滚动容器。打开长列表时，把当前值滚到菜单可视区，
+  // 避免用户每次都要从列表顶部手动寻找已选项；搜索过滤或选项更新后同样校准。
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current) return;
+    const selected = menuRef.current.querySelector<HTMLButtonElement>(
+      `button[data-value="${CSS.escape(value)}"]`,
+    );
+    if (!selected) return;
+    const menu = menuRef.current;
+    const menuRect = menu.getBoundingClientRect();
+    const optionRect = selected.getBoundingClientRect();
+    if (optionRect.top < menuRect.top) {
+      menu.scrollTop -= menuRect.top - optionRect.top;
+    } else if (optionRect.bottom > menuRect.bottom) {
+      menu.scrollTop += optionRect.bottom - menuRect.bottom;
+    }
+  }, [open, value, query, filtered.length]);
+
+  // Keep the option model flat for callers and for filtering, then compose
+  // grouped menu sections only at render time. This preserves stable option
+  // test ids and makes grouped dropdowns opt-in for existing callers.
+  const grouped = filtered.some((option) => option.group)
+    ? Array.from(filtered.reduce((sections, option) => {
+        const name = option.group;
+        const section = sections.get(name) ?? { name, options: [] as DropdownOption[] };
+        section.options.push(option);
+        sections.set(name, section);
+        return sections;
+      }, new Map<string | undefined, { name?: string; options: DropdownOption[] }>()).values())
+    : [{ name: undefined, options: filtered }];
+
   return (
     <div className={`dropdown${open ? " open" : ""}`} ref={rootRef}>
       <button
@@ -134,21 +168,30 @@ export default function Dropdown(props: Props) {
               }}
             />
           ) : null}
-          {filtered.map((option) => (
-            <button
-              type="button"
-              key={option.value}
-              className={`dd-option${option.value === value ? " selected" : ""}`}
-              data-testid={`${testId}-opt-${option.value}`}
-              data-value={option.value}
-              title={option.title ?? option.label}
-              onClick={() => {
-                setOpen(false);
-                if (option.value !== value) onChange(option.value);
-              }}
+          {grouped.map((section, sectionIndex) => (
+            <div
+              className={`dd-group${sectionIndex > 0 ? " separated" : ""}`}
+              data-group={section.name ?? undefined}
+              key={`${section.name ?? "ungrouped"}-${sectionIndex}`}
             >
-              {option.label}
-            </button>
+              {section.name ? <div className="dd-group-label" aria-hidden="true">{section.name}</div> : null}
+              {section.options.map((option) => (
+                <button
+                  type="button"
+                  key={option.value}
+                  className={`dd-option${option.value === value ? " selected" : ""}`}
+                  data-testid={`${testId}-opt-${option.value}`}
+                  data-value={option.value}
+                  title={option.title ?? option.label}
+                  onClick={() => {
+                    setOpen(false);
+                    if (option.value !== value) onChange(option.value);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           ))}
           {open && searchable && filtered.length === 0 ? (
             <div className="dd-empty">无匹配项</div>

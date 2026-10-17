@@ -1,6 +1,10 @@
 .maps-panel {
   --map-surface: #202123;
   --map-border: #3a3b3e;
+  /* The map toolbar is a single control row. Keep every top-level control on
+     the same vertical rhythm, including chips, dropdown triggers and the
+     grouped drawing tools. */
+  --map-toolbar-control-h: 36px;
   color: #e5e5e7;
   gap: 0;
 }
@@ -26,6 +30,38 @@
 .maps-panel .map-mode-indicator { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
 .maps-panel .map-mode-selector { margin-bottom: 12px; }
 .maps-panel .maps-toolbar .btn.tool { width: 30px; height: 30px; padding: 0; flex-shrink: 0; }
+.maps-panel .maps-toolbar {
+  align-items: stretch;
+}
+.maps-panel .maps-toolbar > .btn,
+.maps-panel .maps-toolbar > .dropdown,
+.maps-panel .maps-toolbar > .cell,
+.maps-panel .maps-toolbar > .chip,
+.maps-panel .maps-toolbar > .tool-group {
+  height: var(--map-toolbar-control-h);
+  box-sizing: border-box;
+}
+.maps-panel .maps-toolbar > .btn,
+.maps-panel .maps-toolbar > .dropdown,
+.maps-panel .maps-toolbar > .cell,
+.maps-panel .maps-toolbar > .chip {
+  align-self: stretch;
+}
+.maps-panel .maps-toolbar > .dropdown {
+  display: inline-flex;
+  min-height: 0;
+}
+.maps-panel .maps-toolbar > .dropdown > .dd-trigger {
+  height: 100%;
+  min-height: 0;
+}
+.maps-panel .maps-toolbar > .tool-group {
+  align-items: center;
+  padding: 2px;
+}
+.maps-panel .maps-toolbar > .chip {
+  align-self: stretch;
+}
 .maps-panel .map-source-line { display: flex; justify-content: space-between; font-size: 11px; color: #aaacb0; margin-bottom: 12px; }
 .maps-panel .map-source-line b { color: #ddd; font-weight: 400; }
 .maps-panel .map-segmented { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #4c4e52; border-radius: 4px; overflow: hidden; }
@@ -62,3 +98,21 @@
   .maps-panel .map-inspector-section { padding: 10px; }
   .maps-panel .map-canvas-legend .legend-item { display: none; }
 }
+
+/* Light theme map workspace: retain readable three-pane surfaces while
+   leaving canvas colors and semantic overlays untouched. */
+:root[data-theme="light"] .maps-panel {
+  --map-surface: #ffffff;
+  --map-border: #cbd2da;
+  color: var(--text);
+}
+:root[data-theme="light"] .maps-panel .map-workarea,
+:root[data-theme="light"] .maps-panel .map-canvas-viewport { background: #eef2f6; }
+:root[data-theme="light"] .maps-panel .map-list,
+:root[data-theme="light"] .maps-panel .map-inspector { background: var(--map-surface); }
+:root[data-theme="light"] .maps-panel .map-item.active { background: var(--selected-bg); border-color: var(--accent-line); color: var(--text); }
+:root[data-theme="light"] .maps-panel .map-field .cell,
+:root[data-theme="light"] .maps-panel .map-segmented button { background: var(--bg-input); color: var(--text); border-color: var(--border); }
+:root[data-theme="light"] .maps-panel .map-segmented button.active { background: var(--selected-bg); color: var(--text); }
+:root[data-theme="light"] .maps-panel .map-json-fab,
+:root[data-theme="light"] .maps-panel .map-quickbar .quick-sq { background: var(--bg-elevated); color: var(--text); border-color: var(--border-strong); }

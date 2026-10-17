@@ -338,7 +338,7 @@ function runMapGate(candidatePath, workspaceId) {
           if (['maps', '.godot', '.git'].includes(path.basename(file)) || file.endsWith('.import')) return false;
           const stat = fs.lstatSync(file);
           if (stat.isSymbolicLink()) throw new Error('校验依赖不允许符号链接');
-          return directory === 'src' || stat.isDirectory() || /\.(json|png)$/i.test(file);
+          return directory === 'src' || stat.isDirectory() || /\.(json|png|jpe?g)$/i.test(file);
         },
       });
     }
@@ -347,7 +347,7 @@ function runMapGate(candidatePath, workspaceId) {
       if (image.error) continue;
       const target = path.join(sandbox, image.path.slice(6));
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(assets.resourceFile(workspaceService, workspaceId, image.path, '.png'), target);
+      fs.copyFileSync(assets.imageResourceFile(workspaceService, workspaceId, image.path), target);
     }
     const mount = path.join(sandbox, ws.resPrefix.slice(6));
     fs.mkdirSync(path.dirname(mount), { recursive: true });
@@ -357,7 +357,7 @@ function runMapGate(candidatePath, workspaceId) {
         const rel = relative ? `${relative}/${item.name}` : item.name;
         const source = workspaceService.file(workspaceId, rel, { mustExist: true });
         if (item.isDirectory()) copyData(source, rel);
-        else if (item.isFile() && /\.(json|png)$/i.test(item.name)) {
+        else if (item.isFile() && /\.(json|png|jpe?g)$/i.test(item.name)) {
           const target = path.join(mount, rel);
           fs.mkdirSync(path.dirname(target), { recursive: true });
           fs.copyFileSync(source, target);

@@ -171,7 +171,7 @@ func _validate_background(data: Dictionary) -> Array:
 		var resource: String = value
 		if resource.is_empty():
 			continue
-		if not _allowed_resource(resource, ".png"):
+		if not _allowed_image_resource(resource):
 			errors.append("background.%s path is outside allowed resource roots" % view)
 			continue
 		var texture: Texture2D = load(resource) as Texture2D
@@ -189,6 +189,10 @@ func _allowed_resource(resource: String, extension: String) -> bool:
 		if part.is_empty() or part == "." or part == ".." or ":" in part:
 			return false
 	return true
+
+
+func _allowed_image_resource(resource: String) -> bool:
+	return _allowed_resource(resource, ".png") or _allowed_resource(resource, ".jpg") or _allowed_resource(resource, ".jpeg")
 
 
 func _read_json(path: String) -> Dictionary:

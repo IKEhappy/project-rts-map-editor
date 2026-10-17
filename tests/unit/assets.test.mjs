@@ -20,6 +20,11 @@ function png(width = 2, height = 3, extraBytes = 0) {
   return output;
 }
 
+function jpeg(width = 4, height = 5) {
+  const output = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, height, 0, width, 3, 1, 17, 0, 0, 0xff, 0xd9]);
+  return output;
+}
+
 function decoder(width, height, empty = false) {
   return {
     createFromBuffer() {
@@ -76,6 +81,17 @@ test('pngInfo enforces PNG signature, dimensions, decoded dimensions, size and p
   assert.throws(() => assets.pngInfo(hugePixels, decoder(16384, 16384)), /总像素/);
   const tooLarge = f.write(f.source, 'size.png', png(2, 3, assets.MAX_BYTES));
   assert.throws(() => assets.pngInfo(tooLarge, decoder(2, 3)), /32 MiB/);
+});
+
+test('imageInfo accepts JPG/JPEG dimensions and importImage retains the source extension', (t) => {
+  const f = setup(t);
+  const bytes = jpeg(4, 5);
+  const source = f.write(f.source, 'view.jpg', bytes);
+  assert.deepEqual(assets.imageInfo(source, decoder(4, 5)), { width: 4, height: 5, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+  const result = assets.importImage(f.workspaces, f.session.id, { mapId: 'jpg-map', view: 'image', sourcePath: source }, decoder(4, 5));
+  assert.equal(result.ok, true);
+  assert.match(result.path, /\/image-[a-f0-9]{20}\.jpg$/);
+  assert.deepEqual(fs.readFileSync(f.workspaces.file(f.session.id, result.path.slice(f.session.resPrefix.length))), bytes);
 });
 
 test('backgroundInfo gives a valid map background precedence over renderer config and reports missing views', (t) => {
