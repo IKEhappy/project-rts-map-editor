@@ -1,11 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Trash2 } from "lucide-react";
 import type { Entity, JsonValue } from "../types";
-import { enumOptions, fieldLabel, type LabelsData } from "../labels";
+import { enumOptions, type LabelsData } from "../labels";
 import Dropdown, { type DropdownOption } from "./Dropdown";
 import { FieldLabelView } from "./LabelBits";
 import type { UnitSuggestion } from "../suggest";
 import { FIELD_CREATABLE } from "../field-defaults";
 import { defaultsAtPath, type FeatureSchema } from "../schema-templates";
+import { removeAtPath, setAtPath } from "../field-path";
+import { equalFieldValue } from "../field-value-equality";
+import { currentNumberDraft, parseNumberText, type NumberDraft } from "../number-input-state";
+import "../styles-tree.css";
 
 type Path = Array<string | number>;
 
@@ -18,8 +23,13 @@ interface Props {
   /** 新实体（未存在于已保存文件）：key/id 可编辑（T-164 R10，保存后锁定） */
   identityEditable?: boolean;
   onChange(next: Entity): void;
+  /** Deletion is a discrete history step rather than part of typed input. */
+  onRemoveField?(next: Entity): void;
   /** Union schema from the current document plus the RAM fallback. */
   featureSchema?: FeatureSchema;
+  /** 展开路径沿途的数组并在分页后定位字段；相同路径可递增 request id 重复定位。 */
+  focusPath?: Path;
+  focusRequestId?: number;
 }
 
 const IDENTITY_FIELDS = new Set(["id", "key"]);
@@ -38,6 +48,8 @@ const ARRAY_DEFAULTS: Record<string, JsonValue> = {
 /** 锁定增删的对象数组：tiers 固定 3 行（MatchConfig 校验器锁死） */
 const LOCKED_ARRAYS = new Set(["tiers"]);
 
+const ARRAY_PAGE_SIZE = 50;
+
 function pathKey(path: Path): string {
   return path.map(String).join("-");
 }
@@ -47,17 +59,26 @@ function deepClone<T extends JsonValue>(value: T): T {
 }
 
 function NumberInput(props: { value: number; testId: string; onCommit(next: number): void }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const text = draft ?? String(props.value);
+  const [draft, setDraft] = useState<NumberDraft | null>(null);
+  const activeDraft = currentNumberDraft(draft, props.value);
+  const text = activeDraft?.text ?? String(props.value);
+  const invalidDraft = activeDraft !== null && parseNumberText(activeDraft.text) === null;
+  const live = useRef({ value: props.value, onCommit: props.onCommit, draft: activeDraft });
+  live.current = { value: props.value, onCommit: props.onCommit, draft: activeDraft };
+  useEffect(() => {
+    // Derive the displayed value synchronously above, then discard the stale
+    // draft so redo cannot resurrect a discarded incomplete number.
+    setDraft((previous) => currentNumberDraft(previous, props.value));
+  }, [props.value]);
   // R13：数字可解析即提交（点步进/逐键即时落文档——旧版只在 blur/回车提交，点 +/- 后
   // 画布与文档"没反应"即此因）；非法中间态（空串/首 "-"）留在草稿等 blur 丢弃。
   const commitText = (raw: string | null) => {
     if (raw === null) return;
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed !== props.value) props.onCommit(parsed);
+    const parsed = parseNumberText(raw);
+    if (parsed !== null && parsed !== live.current.value) live.current.onCommit(parsed);
   };
   const commit = () => {
-    commitText(draft);
+    commitText(live.current.draft?.text ?? null);
     setDraft(null);
   };
   // 自绘步进（原生 spinner 步进 1 且无加速，大跨度要长按很久）：单击 ±1，
@@ -70,10 +91,16 @@ function NumberInput(props: { value: number; testId: string; onCommit(next: numb
   };
   useEffect(() => stopHold, []);
   const stepBy = (dir: number) => {
-    const base = draft !== null && Number.isFinite(Number(draft)) ? Number(draft) : props.value;
+    const state = live.current;
+    const base = state.draft ? parseNumberText(state.draft.text) ?? state.value : state.value;
     const next = Math.round((base + dir) * 1e6) / 1e6;
     setDraft(null);
-    if (Number.isFinite(next) && next !== props.value) props.onCommit(next);
+    if (Number.isFinite(next) && next !== state.value) {
+      // Timer callbacks read this ref rather than the pointer-down render's
+      // closed-over value, and advance even before React paints the next step.
+      live.current = { ...state, value: next, draft: null };
+      state.onCommit(next);
+    }
   };
   const startHold = (dir: number) => (event: React.PointerEvent) => {
     event.preventDefault();
@@ -101,18 +128,31 @@ function NumberInput(props: { value: number; testId: string; onCommit(next: numb
         −
       </button>
       <input
-        className="cell num"
+        className={`cell num${invalidDraft ? " invalid" : ""}`}
         data-testid={props.testId}
-        type="number"
+        type="text"
+        inputMode="decimal"
+        role="spinbutton"
+        aria-valuenow={props.value}
+        aria-invalid={invalidDraft || undefined}
+        title={invalidDraft ? "数字尚未完成或格式无效；继续输入，或按 Esc 还原" : undefined}
         value={text}
         onChange={(e) => {
-          setDraft(e.target.value);
-          commitText(e.target.value);
+          const raw = e.target.value;
+          const parsed = parseNumberText(raw);
+          const nextDraft = { text: raw, value: parsed ?? live.current.value };
+          live.current = { ...live.current, draft: nextDraft };
+          setDraft(nextDraft);
+          commitText(raw);
         }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") commit();
           if (e.key === "Escape") setDraft(null);
+          if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+            e.preventDefault();
+            stepBy(e.key === "ArrowUp" ? 1 : -1);
+          }
         }}
       />
       <button
@@ -137,74 +177,90 @@ function getAt(container: Record<string, JsonValue> | JsonValue[], seg: string |
   return (container as Record<string, JsonValue>)[seg] as Record<string, JsonValue> | JsonValue[];
 }
 
-/**
- * R31：结构共享写入——只沿路径替换父容器，其余子树保持同一引用。
- * 旧版 update() 用 deepClone(entity)（JSON 往返整棵实体，含 buildings[]/lines[]/tiers[]），
- * 每次按键都是 O(实体大小)；改后是 O(路径深度)。这同时让 <FieldRow> 的 memo 生效：
- * 未变更的子树引用不变 → 不重渲染。
- * 注意：数组元素增删/排序仍用 deepClone（那是有意的整体克隆，见下方 addElement 等）。
- */
-function setAtPath(root: Record<string, JsonValue>, path: Path, value: JsonValue): Record<string, JsonValue> {
-  const key = path[0];
-  if (path.length === 1) {
-    return { ...root, [key as string]: value };
-  }
-  const child = root[key as string];
-  if (Array.isArray(child)) {
-    const index = path[1] as number;
-    const nextChild = child.slice();
-    nextChild[index] = setAtPathIn(child[index] as Record<string, JsonValue> | JsonValue[], path, 2, value);
-    return { ...root, [key as string]: nextChild };
-  }
-  if (child !== null && typeof child === "object") {
-    return { ...root, [key as string]: setAtPathIn(child as Record<string, JsonValue>, path, 1, value) };
-  }
-  return { ...root, [key as string]: value };
-}
-
-/** setAtPath 的递归体：从 path[from] 开始定位，逐层浅拷贝父容器。 */
-function setAtPathIn(node: Record<string, JsonValue> | JsonValue[], path: Path, from: number, value: JsonValue): JsonValue {
-  const key = path[from];
-  const isLast = from === path.length - 1;
-  if (isLast) {
-    if (Array.isArray(node)) {
-      const arr = (node as JsonValue[]).slice();
-      arr[key as number] = value;
-      return arr;
-    }
-    return { ...(node as Record<string, JsonValue>), [key as string]: value };
-  }
-  const nextSeg = path[from + 1];
-  const child = Array.isArray(node) ? (node as JsonValue[])[key as number] : (node as Record<string, JsonValue>)[key as string];
-  let nextChild: JsonValue;
-  if (child !== null && typeof child === "object") {
-    nextChild = setAtPathIn(child as Record<string, JsonValue> | JsonValue[], path, from + 1, value);
-  } else {
-    // 路径前缀缺失（字段树允许中途新增字段）：按下一段类型造容器
-    let fresh: Record<string, JsonValue> | JsonValue[] = typeof nextSeg === "number" ? [] : {};
-    nextChild = setAtPathIn(fresh, path, from + 1, value);
-  }
-  if (Array.isArray(node)) {
-    const arr = (node as JsonValue[]).slice();
-    arr[key as number] = nextChild;
-    return arr;
-  }
-  return { ...(node as Record<string, JsonValue>), [key as string]: nextChild };
-}
-
-
-function parentAt(root: Entity, path: Path): Record<string, JsonValue> | JsonValue[] {
-  let cursor: Record<string, JsonValue> | JsonValue[] = root;
-  for (let i = 0; i < path.length - 1; i += 1) {
-    cursor = getAt(cursor, path[i]);
-  }
-  return cursor;
+/** 给对象加字段。组件类型保持稳定，父树更新不重置展开状态/输入草稿。 */
+function AddFieldButton({ path, node, featureSchema, onAdd }: {
+  path: Path;
+  node: Record<string, JsonValue>;
+  featureSchema?: FeatureSchema;
+  onAdd(path: Path, field: string, value: JsonValue): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [valueType, setValueType] = useState("string");
+  const token = JSON.stringify(path);
+  // Closed controls must not resolve a schema for every map row on every
+  // keystroke. Resolve only while the picker is visible; keep the result
+  // while its local name/type draft changes.
+  const schemaDefaults = useMemo(() => open
+    ? featureSchema ? defaultsAtPath(featureSchema, path) : FIELD_CREATABLE
+    : {}, [open, featureSchema, token]);
+  const existing = new Set(Object.keys(node));
+  const candidates = Object.keys(schemaDefaults).filter((key) => !existing.has(key));
+  const commit = (fieldName: string) => {
+    if (!fieldName || existing.has(fieldName)) return;
+    const customValue: JsonValue = valueType === "number" ? 0 : valueType === "boolean" ? false : valueType === "object" ? {} : valueType === "array" ? [] : "";
+    onAdd(path, fieldName, Object.hasOwn(schemaDefaults, fieldName) ? schemaDefaults[fieldName] : customValue);
+    setOpen(false);
+    setName("");
+  };
+  return (
+    <div className="add-field-row">
+      {open ? (
+        <>
+          <input
+            className="cell str"
+            data-testid={`add-field-input-${pathKey(path)}`}
+            type="text"
+            placeholder="字段名…"
+            value={name}
+            autoFocus
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commit(name.trim());
+              if (e.key === "Escape") setOpen(false);
+            }}
+          />
+          <button className="mini" data-testid={`add-field-ok-${pathKey(path)}`} title="创建" onClick={() => commit(name.trim())}>✓</button>
+          <select className="cell" aria-label="新字段类型" data-testid={`add-field-type-${pathKey(path)}`} value={valueType} onChange={(event) => setValueType(event.target.value)}>
+            <option value="string">文本</option>
+            <option value="number">数值</option>
+            <option value="boolean">布尔</option>
+            <option value="object">对象</option>
+            <option value="array">数组</option>
+          </select>
+          {candidates.length > 0 ? (
+            <select
+              className="cell"
+              data-testid={`add-field-select-${pathKey(path)}`}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) commit(e.target.value);
+              }}
+            >
+              <option value="">标准字段…</option>
+              {candidates.map((k) => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+          ) : null}
+          <button className="mini" title="取消" onClick={() => setOpen(false)}>✕</button>
+        </>
+      ) : (
+        <button className="mini add" data-testid={`add-field-btn-${pathKey(path)}`} onClick={() => setOpen(true)}>
+          ＋ 新增字段
+        </button>
+      )}
+    </div>
+  );
 }
 
 /** 选中实体的字段树：标量行内编辑；标量数组逐元素增删/排序；对象数组（tiers/lines）嵌套展开。 */
-export default function FieldTree(props: Props) {
+function FieldTree(props: Props) {
   const { entity, original, labels, lightErrors, unitSuggestions, identityEditable, onChange, featureSchema } = props;
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map());
+  const [arrayPages, setArrayPages] = useState<Record<string, number>>({});
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   // 顶层字段拖拽排序（T-164 R10：三横杠手柄拖动调整字段顺序，写回 JSON 键序）
   const [dragField, setDragField] = useState<string | null>(null);
   const [dropField, setDropField] = useState<string | null>(null);
@@ -227,31 +283,31 @@ export default function FieldTree(props: Props) {
     onChange(setAtPath(entity, path, value));
   };
 
+  const arrayAt = (path: Path): JsonValue[] => {
+    let cursor: JsonValue = entity;
+    for (const segment of path) cursor = getAt(cursor as Record<string, JsonValue> | JsonValue[], segment);
+    return cursor as JsonValue[];
+  };
+
   const removeElement = (path: Path) => {
-    const next = deepClone(entity);
-    const parent = parentAt(next, path);
-    (parent as JsonValue[]).splice(path[path.length - 1] as number, 1);
-    onChange(next);
+    const arrayPath = path.slice(0, -1);
+    const index = path[path.length - 1] as number;
+    update(arrayPath, arrayAt(arrayPath).filter((_, at) => at !== index));
   };
 
   const moveElement = (path: Path, delta: number) => {
+    const arrayPath = path.slice(0, -1);
     const index = path[path.length - 1] as number;
     const target = index + delta;
-    const next = deepClone(entity);
-    const arr = parentAt(next, path) as JsonValue[];
+    const arr = arrayAt(arrayPath).slice();
     if (target < 0 || target >= arr.length) return;
     const [moved] = arr.splice(index, 1);
     arr.splice(target, 0, moved);
-    onChange(next);
+    update(arrayPath, arr);
   };
 
   const addElement = (arrayPath: Path, field: string) => {
-    const next = deepClone(entity);
-    let cursor: Record<string, JsonValue> | JsonValue[] = next;
-    for (const seg of arrayPath) {
-      cursor = getAt(cursor, seg);
-    }
-    const arr = cursor as JsonValue[];
+    const arr = arrayAt(arrayPath);
     const last = arr[arr.length - 1];
     const options = enumOptions(labels, field);
     const defaults = featureSchema ? defaultsAtPath(featureSchema, arrayPath.slice(0, -1))[field] : undefined;
@@ -272,93 +328,65 @@ export default function FieldTree(props: Props) {
     } else {
       element = {};
     }
-    arr.push(element);
-    onChange(next);
+    update(arrayPath, [...arr, element]);
+    const stateKey = JSON.stringify(arrayPath);
+    // Inserting the 51st element must not change a previously expanded array
+    // into the default-collapsed large-array state.
+    setCollapsed((previous) => new Map(previous).set(stateKey, false));
+    setArrayPages((previous) => ({ ...previous, [stateKey]: Math.floor(arr.length / ARRAY_PAGE_SIZE) }));
+    setPendingFocus(JSON.stringify([...arrayPath, arr.length]));
   };
 
-  /** R30：给对象加字段——下拉选 FIELD_CREATABLE 中未存在的键，或输入自定义键名 */
-  const AddFieldButton = ({ path }: { path: Path }) => {
-    const [open, setOpen] = useState(false);
-    const [name, setName] = useState("");
-    const [valueType, setValueType] = useState("string");
-    const existing = new Set<string>();
-    let cursor: JsonValue = entity;
-    for (const seg of path) cursor = getAt(cursor as Record<string, JsonValue> | JsonValue[], seg);
-    if (cursor && typeof cursor === "object" && !Array.isArray(cursor)) {
-      for (const k of Object.keys(cursor as Record<string, JsonValue>)) existing.add(k);
+  const addField = (path: Path, field: string, value: JsonValue) => {
+    update([...path, field], deepClone(value));
+  };
+
+  const removeField = (path: Path) => {
+    (props.onRemoveField ?? onChange)(removeAtPath(entity, path));
+  };
+
+  const toggleCollapse = (key: string, isCollapsed: boolean) => {
+    setCollapsed((prev) => new Map(prev).set(key, !isCollapsed));
+  };
+
+  const focusToken = props.focusPath ? JSON.stringify(props.focusPath) : null;
+  // Resolve the path against the current immutable document once per request.
+  // Pagination and expansion settle before the layout effect queries the DOM.
+  useEffect(() => {
+    if (!focusToken) return;
+    const path = JSON.parse(focusToken) as Path;
+    const expanded: Array<[string, boolean]> = [];
+    const pages: Record<string, number> = {};
+    let node: JsonValue = entity;
+    const ancestor: Path = [];
+    for (const segment of path) {
+      if (Array.isArray(node)) {
+        const key = JSON.stringify(ancestor);
+        expanded.push([key, false]);
+        if (typeof segment === "number") pages[key] = Math.floor(segment / ARRAY_PAGE_SIZE);
+      }
+      if (node === null || typeof node !== "object") break;
+      node = Array.isArray(node) ? node[segment as number] : node[String(segment)];
+      ancestor.push(segment);
     }
-    const schemaDefaults = featureSchema ? defaultsAtPath(featureSchema, path) : FIELD_CREATABLE;
-    const candidates = Object.keys(schemaDefaults).filter((k) => !existing.has(k));
-    const commit = (fieldName: string) => {
-      if (!fieldName || existing.has(fieldName)) return;
-      const next = deepClone(entity);
-      let cur: Record<string, JsonValue> | JsonValue[] = next;
-      for (const seg of path) cur = getAt(cur, seg);
-      const customValue: JsonValue = valueType === "number" ? 0 : valueType === "boolean" ? false : valueType === "object" ? {} : valueType === "array" ? [] : "";
-      (cur as Record<string, JsonValue>)[fieldName] = deepClone(schemaDefaults[fieldName] ?? customValue);
-      onChange(next);
-      setOpen(false);
-      setName("");
-    };
-    return (
-      <div className="add-field-row">
-        {open ? (
-          <>
-            <input
-              className="cell str"
-              data-testid={`add-field-input-${pathKey(path)}`}
-              type="text"
-              placeholder="字段名…"
-              value={name}
-              autoFocus
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commit(name.trim());
-                if (e.key === "Escape") setOpen(false);
-              }}
-            />
-            <button className="mini" data-testid={`add-field-ok-${pathKey(path)}`} title="创建" onClick={() => commit(name.trim())}>✓</button>
-            <select className="cell" aria-label="新字段类型" data-testid={`add-field-type-${pathKey(path)}`} value={valueType} onChange={(event) => setValueType(event.target.value)}>
-              <option value="string">文本</option>
-              <option value="number">数值</option>
-              <option value="boolean">布尔</option>
-              <option value="object">对象</option>
-              <option value="array">数组</option>
-            </select>
-            {candidates.length > 0 ? (
-              <select
-                className="cell"
-                data-testid={`add-field-select-${pathKey(path)}`}
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) commit(e.target.value);
-                }}
-              >
-                <option value="">标准字段…</option>
-                {candidates.map((k) => (
-                  <option key={k} value={k}>{k}</option>
-                ))}
-              </select>
-            ) : null}
-            <button className="mini" title="取消" onClick={() => setOpen(false)}>✕</button>
-          </>
-        ) : (
-          <button className="mini add" data-testid={`add-field-btn-${pathKey(path)}`} onClick={() => setOpen(true)}>
-            ＋ 新增字段
-          </button>
-        )}
-      </div>
-    );
-  };
+    // Context actions target the array itself (for example ["lines"]), so
+    // expand that final node as well as its array ancestors.
+    if (Array.isArray(node)) expanded.push([JSON.stringify(ancestor), false]);
+    setCollapsed((previous) => new Map([...previous, ...expanded]));
+    setArrayPages((previous) => ({ ...previous, ...pages }));
+    setPendingFocus(focusToken);
+  }, [focusToken, props.focusRequestId]);
 
-  const toggleCollapse = (key: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
+  useLayoutEffect(() => {
+    if (!pendingFocus || !rootRef.current) return;
+    const element = Array.from(rootRef.current.querySelectorAll<HTMLElement>("[data-field-path]"))
+      .find((candidate) => candidate.dataset.fieldPath === pendingFocus);
+    if (!element) return;
+    element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const control = element.querySelector<HTMLElement>("input, select") ?? element.querySelector<HTMLElement>("button");
+    control?.focus({ preventScroll: true });
+    setPendingFocus(null);
+  }, [pendingFocus, collapsed, arrayPages]);
 
   const renderScalar = (field: string, value: JsonValue, path: Path, testId: string): React.ReactNode => {
     const error = lightErrors.get(pathKey(path));
@@ -442,12 +470,17 @@ export default function FieldTree(props: Props) {
 
   const renderArray = (field: string, values: JsonValue[], originalValues: JsonValue[] | undefined, path: Path): React.ReactNode => {
     const key = pathKey(path);
-    const isCollapsed = collapsed.has(key);
+    const stateKey = JSON.stringify(path);
+    const isCollapsed = collapsed.get(stateKey) ?? values.length > ARRAY_PAGE_SIZE;
+    const pageCount = Math.max(1, Math.ceil(values.length / ARRAY_PAGE_SIZE));
+    const page = Math.min(arrayPages[stateKey] ?? 0, pageCount - 1);
+    const start = page * ARRAY_PAGE_SIZE;
     const locked = LOCKED_ARRAYS.has(field);
-    const objectRows = values.length > 0 && values.every((v) => v !== null && typeof v === "object" && !Array.isArray(v));
+    const visible = isCollapsed ? [] : values.slice(start, start + ARRAY_PAGE_SIZE);
+    const objectRows = !isCollapsed && values.length > 0 && values.every((v) => v !== null && typeof v === "object" && !Array.isArray(v));
     return (
       <div className="tree-node">
-        <button className="collapse-btn" onClick={() => toggleCollapse(key)} title={isCollapsed ? "展开" : "折叠"}>
+        <button className="collapse-btn" onClick={() => toggleCollapse(stateKey, isCollapsed)} title={isCollapsed ? "展开" : "折叠"}>
           {isCollapsed ? "▸" : "▾"}
         </button>
         <span className="node-title">
@@ -455,9 +488,10 @@ export default function FieldTree(props: Props) {
         </span>
         {!isCollapsed ? (
           <div className="tree-children">
-            {values.map((element, index) =>
-              objectRows ? (
-                <div className="tree-row-box" key={index}>
+            {visible.map((element, offset) => {
+              const index = start + offset;
+              return objectRows ? (
+                <div className="tree-row-box" key={index} data-field-path={JSON.stringify([...path, index])}>
                   <div className="tree-row-head">
                     <span className="row-index">#{index}</span>
                     {!locked ? (
@@ -468,7 +502,7 @@ export default function FieldTree(props: Props) {
                         <button className="mini" title="下移" onClick={() => moveElement([...path, index], 1)} disabled={index === values.length - 1}>
                           ↓
                         </button>
-                        <button className="mini danger" title="删除" onClick={() => removeElement([...path, index])}>
+                        <button className="mini danger" data-testid={`array-remove-${pathKey([...path, index])}`} title="删除" onClick={() => removeElement([...path, index])}>
                           ✕
                         </button>
                       </span>
@@ -483,10 +517,10 @@ export default function FieldTree(props: Props) {
                       renderFieldRow(childField, childValue, originalChild, childPath, false)
                     }
                   />
-                  {featureSchema ? <AddFieldButton path={[...path, index]} /> : null}
+                  {featureSchema ? <AddFieldButton path={[...path, index]} node={element as Record<string, JsonValue>} featureSchema={featureSchema} onAdd={addField} /> : null}
                 </div>
               ) : (
-                <div className="tree-row" key={index}>
+                <div className="tree-row" key={index} data-field-path={JSON.stringify([...path, index])}>
                   <span className="row-index">{index}</span>
                   {renderScalar(field, element, [...path, index], `field-${pathKey([...path, index])}`)}
                   <span className="row-ops">
@@ -496,16 +530,23 @@ export default function FieldTree(props: Props) {
                     <button className="mini" title="下移" onClick={() => moveElement([...path, index], 1)} disabled={index === values.length - 1}>
                       ↓
                     </button>
-                    <button className="mini danger" title="删除" onClick={() => removeElement([...path, index])}>
+                    <button className="mini danger" data-testid={`array-remove-${pathKey([...path, index])}`} title="删除" onClick={() => removeElement([...path, index])}>
                       ✕
                     </button>
                   </span>
                 </div>
-              ),
-            )}
+              );
+            })}
+            {pageCount > 1 ? (
+              <div className="add-field-row" data-testid={`array-pages-${key}`}>
+                <button className="mini" title="上一页" disabled={page === 0} onClick={() => setArrayPages((previous) => ({ ...previous, [stateKey]: page - 1 }))}>上一页</button>
+                <span className="row-index">{start + 1}–{Math.min(start + ARRAY_PAGE_SIZE, values.length)} / {values.length}</span>
+                <button className="mini" title="下一页" disabled={page === pageCount - 1} onClick={() => setArrayPages((previous) => ({ ...previous, [stateKey]: page + 1 }))}>下一页</button>
+              </div>
+            ) : null}
             {!locked ? (
               <div className="add-field-row">
-                <button className="mini add" onClick={() => addElement(path, field)}>＋ 添加</button>
+                <button className="mini add" data-testid={`array-add-${key}`} onClick={() => addElement(path, field)}>＋ 添加</button>
                 {values.length === 0 && !(field in ARRAY_DEFAULTS) && field !== "lines" ? <select
                   className="cell"
                   aria-label="数组元素类型"
@@ -530,7 +571,7 @@ export default function FieldTree(props: Props) {
     identity: boolean,
     topLevel = false,
   ): React.ReactNode => {
-    const dirty = JSON.stringify(value) !== JSON.stringify(originalValue);
+    const dirty = !equalFieldValue(value, originalValue);
     const testId = `field-${pathKey(path)}`;
     let editor: React.ReactNode;
     if (identity) {
@@ -569,7 +610,7 @@ export default function FieldTree(props: Props) {
               renderFieldRow(childField, childValue, originalChild, childPath, false)
             }
           />
-          <AddFieldButton path={path} />
+          <AddFieldButton path={path} node={value as Record<string, JsonValue>} featureSchema={featureSchema} onAdd={addField} />
         </div>
       );
     } else {
@@ -579,6 +620,7 @@ export default function FieldTree(props: Props) {
       <div
         className={`field-row${dirty ? " dirty" : ""}${topLevel && dragField === field ? " dragging" : ""}${topLevel && dropField === field ? " drop-target" : ""}`}
         key={field}
+        data-field-path={JSON.stringify(path)}
         onDragOver={
           topLevel && dragField !== null && dragField !== field
             ? (event) => {
@@ -613,7 +655,16 @@ export default function FieldTree(props: Props) {
           </span>
         ) : null}
         <div className="field-label" title={field}>
-          <FieldLabelView field={field} labels={labels} />
+          <span className="field-label-content"><FieldLabelView field={field} labels={labels} /></span>
+          <button
+            className="mini danger field-remove"
+            type="button"
+            data-testid={`field-remove-${pathKey(path)}`}
+            aria-label={`删除字段 ${field}`}
+            title={identity ? "身份字段不能删除" : `删除字段 ${field}（可撤销；必填字段需补齐后才能保存）`}
+            disabled={identity}
+            onClick={() => removeField(path)}
+          ><Trash2 size={13} aria-hidden="true" /></button>
         </div>
         <div className="field-editor">{editor}</div>
       </div>
@@ -621,14 +672,18 @@ export default function FieldTree(props: Props) {
   };
 
   return (
-    <div className="field-tree">
+    <div className="field-tree" ref={rootRef}>
       {Object.entries(entity).map(([field, value]) =>
         renderFieldRow(field, value, (original as Record<string, JsonValue>)[field], [field], IDENTITY_FIELDS.has(field), true),
       )}
-      {featureSchema ? <AddFieldButton path={[]} /> : null}
+      {featureSchema ? <AddFieldButton path={[]} node={entity} featureSchema={featureSchema} onAdd={addField} /> : null}
     </div>
   );
 }
+
+// Canvas hover/pan state does not change the immutable document. Keep these
+// parent updates from rebuilding the JSON controls while the drawer is open.
+export default memo(FieldTree);
 
 /** 树中一层字段列表（实体本体与嵌套对象/对象数组行共用） */
 function FieldRows(props: {

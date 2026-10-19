@@ -9,9 +9,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./store.cjs');
 const { WorkspaceService } = require('./workspace.cjs');
+const { WriteService } = require('./write-service.cjs');
 const assets = require('./assets.cjs');
-const { importMap } = require('./map-import.cjs');
 let workspaces;
+let writes;
 
 function validateProject(projectRoot) {
   for (const file of ['data/units.json', 'data/buildings.json', 'data/rules.json']) assets.readJson(assets.regularFile(projectRoot, file));
@@ -112,12 +113,12 @@ function registerIpc() {
       if (!selected) return { ok: false, error: '已取消选择' };
       if (path.resolve(selected) === path.parse(path.resolve(selected)).root || fs.existsSync(path.join(selected, 'project.godot'))) throw new Error('请选择地图文件夹，不可选择磁盘根目录或整个 Godot 工程');
       assets.regularFile(store.env().godotProject, 'src/sim/game_map.gd');
-      const session = workspaces.open({ path: selected, projectRoot: payload?.projectRoot });
+      const session = await writes.exclusive(() => workspaces.open({ path: selected, projectRoot: payload?.projectRoot }));
       return { ok: true, workspace: session };
     } catch (error) { return { ok: false, error: errorText(error) }; }
   });
-  ipcMain.handle('workspace:close', (_event, id) => {
-    try { withWorkspace(id); workspaces.close(id); return { ok: true }; }
+  ipcMain.handle('workspace:close', async (_event, id) => {
+    try { await writes.exclusive(() => { withWorkspace(id); workspaces.close(id); }); return { ok: true }; }
     catch (error) { return { ok: false, error: errorText(error) }; }
   });
   ipcMain.handle('workspace:compare', (_event, id) => {
@@ -136,8 +137,8 @@ function registerIpc() {
       return { ok: true, before: before?.toString('utf8') || '', after: after?.toString('utf8') || '' };
     } catch (error) { return { ok: false, error: errorText(error) }; }
   });
-  ipcMain.handle('workspace:restore', (_event, id) => {
-    try { withWorkspace(id); return { ok: true, workspace: workspaces.restore(id, {}) }; }
+  ipcMain.handle('workspace:restore', async (_event, id) => {
+    try { return { ok: true, workspace: await writes.exclusive(() => { withWorkspace(id); return workspaces.restore(id, {}); }) }; }
     catch (error) { return { ok: false, error: errorText(error) }; }
   });
   ipcMain.handle('workspace:config', (_event, kind, id) => {
@@ -158,7 +159,7 @@ function registerIpc() {
       const sourcePath = payload.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }], title: '导入整图 PNG / JPG' });
       if (!sourcePath) return { ok: false, error: '已取消导入' };
       withWorkspace(id);
-      return assets.importImage(workspaces, id, { ...payload, sourcePath }, nativeImage);
+      return await writes.run('importImage', { workspaceId: id, mapId: payload.mapId, view: payload.view, sourcePath });
     } catch (error) { return { ok: false, error: errorText(error) }; }
   });
   ipcMain.handle('maps:import', async (_event, payload) => {
@@ -168,7 +169,7 @@ function registerIpc() {
       const sourcePath = payload?.sourcePath || await pickFile({ properties: ['openFile'], filters: [{ name: '地图 JSON', extensions: ['json'] }], title: '导入地图 JSON 与整图资源' });
       if (!sourcePath) return { ok: false, errors: ['已取消导入'] };
       withWorkspace(id);
-      return importMap({ workspaces, id, sourcePath, nativeImage, saveMap: store.saveMap });
+      return await writes.run('importMap', { workspaceId: id, sourcePath });
     } catch (error) {
       return { ok: false, errors: [errorText(error)] };
     }
@@ -190,11 +191,11 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('config:save', (_event, payload) => {
+  ipcMain.handle('config:save', async (_event, payload) => {
     try {
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('配置保存参数无效');
       withWorkspace(payload.workspaceId);
-      return store.saveKind(payload);
+      return await writes.run('saveKind', payload);
     } catch (error) { return { ok: false, code: 'io', errors: [errorText(error)] }; }
   });
 
@@ -214,12 +215,12 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('maps:save', (_event, payload) => {
+  ipcMain.handle('maps:save', async (_event, payload) => {
     if (!payload || typeof payload.name !== 'string' || !payload.data || typeof payload.data !== 'object') {
       return { ok: false, code: 'usage', errors: ['payload.name/data must be valid'] };
     }
     try {
-      return store.saveMap({
+      return await writes.run('saveMap', {
         name: payload.name,
         data: payload.data,
         baseHash: String(payload.baseHash || ''),
@@ -231,12 +232,12 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('maps:rename', (_event, payload) => {
+  ipcMain.handle('maps:rename', async (_event, payload) => {
     if (!payload || typeof payload.from !== 'string' || typeof payload.to !== 'string') {
       return { ok: false, code: 'usage', errors: ['payload.from/to must be strings'] };
     }
     try {
-      return store.renameMap(payload);
+      return await writes.run('renameMap', payload);
     } catch (err) {
       return { ok: false, code: 'io', errors: [String(err && err.message ? err.message : err)] };
     }
@@ -304,6 +305,7 @@ app.whenReady().then(() => {
     },
   });
   store.configureWorkspace(workspaces, nativeImage);
+  writes = new WriteService(workspaces);
   registerIpc();
   createWindow();
   app.on('activate', () => {
@@ -311,6 +313,17 @@ app.whenReady().then(() => {
   });
 });
 
+let quitReady = false;
+let shutdown;
+app.on('before-quit', (event) => {
+  if (!writes || quitReady) return;
+  event.preventDefault();
+  if (shutdown) return;
+  shutdown = writes.close().then(() => {
+    try { workspaces?.releaseAll(); }
+    finally { quitReady = true; app.quit(); }
+  });
+});
 app.on('will-quit', () => workspaces?.releaseAll());
 
 app.on('window-all-closed', () => app.quit());

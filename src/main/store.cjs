@@ -316,11 +316,37 @@ function readMap(name, mapsDir) {
   };
 }
 
-function runMapGate(candidatePath, workspaceId) {
+function mapGateDependencies(data, resources, workspaceId) {
+  const dependencies = DATA_FILES.map((name) => {
+    const file = configPath(workspaceId, name);
+    assets.readJson(file);
+    return { resource: `res://data/${name}`, configName: name, file, hash: sha256(fs.readFileSync(file)) };
+  });
+  if (data.renderer) {
+    const file = assets.resourceFile(workspaceService, workspaceId, data.renderer, '.json');
+    dependencies.push({ resource: data.renderer, file, hash: sha256(fs.readFileSync(file)) });
+  }
+  for (const image of Object.values(resources.images)) {
+    if (!image.error && !dependencies.some((entry) => entry.resource === image.path)) {
+      dependencies.push({ resource: image.path, file: assets.imageResourceFile(workspaceService, workspaceId, image.path), hash: image.sha256 });
+    }
+  }
+  return dependencies;
+}
+
+function unchangedDependencies(dependencies, workspaceId) {
+  return dependencies.every((entry) => {
+    const file = entry.configName ? configPath(workspaceId, entry.configName)
+      : assets.resourceFile(workspaceService, workspaceId, entry.resource, path.extname(entry.resource).toLowerCase());
+    return file === entry.file && sha256(fs.readFileSync(file)) === entry.hash;
+  });
+}
+
+function runMapGate(candidatePath, workspaceId, dependencies) {
   const m = mapEnv();
   const e = env();
   const exe = fs.existsSync(e.godotExe) ? e.godotExe : 'godot';
-  const ws = workspace(workspaceId);
+  workspace(workspaceId);
   const sandbox = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pixel-map-gate-'));
   const gateOptions = { encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, APPDATA: path.join(sandbox, 'user-data'), XDG_DATA_HOME: path.join(sandbox, 'user-data') } };
@@ -329,42 +355,21 @@ function runMapGate(candidatePath, workspaceId) {
     fs.copyFileSync(path.join(TOOL_ROOT, 'gate', 'session_stub.gd'), path.join(sandbox, '.gate_session.gd'));
     fs.copyFileSync(path.join(TOOL_ROOT, 'gate', 'console_stub.gd'), path.join(sandbox, '.gate_console.gd'));
     // The gate always runs on a copy. It must never create candidates/import caches in the game project.
-    for (const directory of ['src', 'data']) {
-      // Executable code is always the tool's trusted game implementation, never an imported package.
-      const source = path.join(directory === 'src' ? e.godotProject : ws.projectRoot, directory);
-      if (fs.existsSync(source)) fs.cpSync(source, path.join(sandbox, directory), {
-        recursive: true,
-        filter: (file) => {
-          if (['maps', '.godot', '.git'].includes(path.basename(file)) || file.endsWith('.import')) return false;
-          const stat = fs.lstatSync(file);
-          if (stat.isSymbolicLink()) throw new Error('校验依赖不允许符号链接');
-          return directory === 'src' || stat.isDirectory() || /\.(json|png|jpe?g)$/i.test(file);
-        },
-      });
-    }
-    const background = assets.backgroundInfo(workspaceService, workspaceId, assets.readJson(candidatePath), imageDecoder, false);
-    for (const image of Object.values(background.images)) {
-      if (image.error) continue;
-      const target = path.join(sandbox, image.path.slice(6));
+    // Executable code is always the tool's trusted implementation. The gate
+    // reads only the three tables, declared renderer and effective background;
+    // importing the entire maps/image library on every save is unnecessary.
+    assets.regularFile(e.godotProject, 'src/sim/game_map.gd');
+    fs.cpSync(path.join(e.godotProject, 'src'), path.join(sandbox, 'src'), { recursive: true, filter: (file) => {
+      if (fs.lstatSync(file).isSymbolicLink()) throw new Error('可信校验源码不允许符号链接');
+      return true;
+    } });
+    for (const dependency of dependencies) {
+      const bytes = fs.readFileSync(dependency.file);
+      if (sha256(bytes) !== dependency.hash) return { ok: false, errors: ['校验依赖被外部修改，请重新保存'] };
+      const target = path.join(sandbox, dependency.resource.slice(6));
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(assets.imageResourceFile(workspaceService, workspaceId, image.path), target);
+      fs.writeFileSync(target, bytes);
     }
-    const mount = path.join(sandbox, ws.resPrefix.slice(6));
-    fs.mkdirSync(path.dirname(mount), { recursive: true });
-    fs.mkdirSync(mount, { recursive: true });
-    const copyData = (folder, relative = '') => {
-      for (const item of fs.readdirSync(folder, { withFileTypes: true })) {
-        const rel = relative ? `${relative}/${item.name}` : item.name;
-        const source = workspaceService.file(workspaceId, rel, { mustExist: true });
-        if (item.isDirectory()) copyData(source, rel);
-        else if (item.isFile() && /\.(json|png|jpe?g)$/i.test(item.name)) {
-          const target = path.join(mount, rel);
-          fs.mkdirSync(path.dirname(target), { recursive: true });
-          fs.copyFileSync(source, target);
-        }
-      }
-    };
-    copyData(ws.root);
     const imported = spawnSync(exe, ['--headless', '--path', sandbox, '--import'], gateOptions);
     if (imported.error || imported.status !== 0 || /SCRIPT ERROR|^ERROR:/m.test(`${imported.stdout}\n${imported.stderr}`)) {
       return { ok: false, errors: [`Godot staging 导入失败：${String(imported.error?.message || imported.stderr || imported.stdout).slice(0, 2500)}`] };
@@ -433,41 +438,53 @@ function saveMap({ name, data, baseHash, workspaceId, expectCreate }) {
   if (!exists && !expectCreate) {
     return { ok: false, code: 'usage', errors: [`地图不存在（可能已被外部删除）：${file}`] };
   }
+  let text;
+  try { text = configText(data); }
+  catch (error) { return { ok: false, code: 'usage', errors: [error.message] }; }
+  let current;
   if (exists) {
-    const current = fs.readFileSync(full, 'utf8');
+    current = fs.readFileSync(full, 'utf8');
     if (sha256(current) !== baseHash) {
       return { ok: false, code: 'conflict', errors: ['文件在加载后被外部修改，请点「重新加载」后再编辑'] };
     }
-    const text = serialize(data);
     if (text === current) {
       return { ok: true, written: false, reason: 'unchanged', hash: baseHash, errors: [] };
     }
   }
-  const text = serialize(data);
-  if (Buffer.byteLength(text, 'utf8') > assets.MAX_BYTES) return { ok: false, code: 'usage', errors: ['地图超过 32 MiB 上限'] };
   const resources = assets.backgroundInfo(workspaceService, workspaceId, data, imageDecoder, false);
   if (!resources.ok) return { ok: false, code: 'assets', errors: resources.errors };
+  const dependencies = mapGateDependencies(data, resources, workspaceId);
   const candidateDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pixel-map-candidate-'));
   const candidate = path.join(candidateDir, `${crypto.randomUUID()}.json`);
-  fs.writeFileSync(candidate, text, 'utf8');
   let gate;
-  try { gate = runMapGate(candidate, workspaceId); }
+  try { writeDurable(candidate, text); gate = runMapGate(candidate, workspaceId, dependencies); }
   finally { fs.rmSync(candidateDir, { recursive: true, force: true }); }
   if (!gate.ok) {
     return { ok: false, code: 'gate', errors: gate.errors };
+  }
+  if (!unchangedDependencies(dependencies, workspaceId)) {
+    return { ok: false, code: 'conflict', errors: ['校验期间配置或贴图资源被外部修改，未保存，请重新加载'] };
   }
   workspaceService.file(workspaceId, file);
   if (exists !== fs.existsSync(full) || (exists && sha256(fs.readFileSync(full, 'utf8')) !== baseHash)) {
     return { ok: false, code: 'conflict', errors: ['校验期间文件被外部修改，未保存，请重新加载'] };
   }
-  if (exists) {
-    const backup = workspaceService.file(workspaceId, `${file}.bak`);
-    if (fs.existsSync(backup) && !fs.statSync(backup).isFile()) throw new Error('地图 .bak 目标不是普通文件');
-    fs.copyFileSync(full, backup);
-  }
+  const backup = workspaceService.file(workspaceId, `${file}.bak`);
+  if (fs.existsSync(backup) && !fs.statSync(backup).isFile()) throw new Error('地图 .bak 目标不是普通文件');
   const tmp = `${full}.${crypto.randomUUID()}.tmp`;
-  try { fs.writeFileSync(tmp, text, { encoding: 'utf8', flag: 'wx' }); fs.renameSync(tmp, full); }
-  finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
+  const backupTmp = `${backup}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeDurable(tmp, text);
+    if (exists) writeDurable(backupTmp, current);
+    workspaceService.file(workspaceId, file);
+    workspaceService.file(workspaceId, `${file}.bak`);
+    if (exists !== fs.existsSync(full) || (exists && sha256(fs.readFileSync(full, 'utf8')) !== baseHash) || !unchangedDependencies(dependencies, workspaceId)) {
+      return { ok: false, code: 'conflict', errors: ['落盘前地图、配置或贴图被外部修改，未保存'] };
+    }
+    if (exists) fs.renameSync(backupTmp, backup);
+    fs.renameSync(tmp, full);
+  }
+  finally { for (const temporary of [tmp, backupTmp]) if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
   return { ok: true, written: true, hash: sha256(text), errors: [], name: file, path: full };
 }
 

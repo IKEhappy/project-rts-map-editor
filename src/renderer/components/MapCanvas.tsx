@@ -4,6 +4,8 @@ import type { Entity, JsonValue } from "../types";
 import type { ToolState } from "../map-edit-ops";
 import { ppcOf, stepZoom, wheelDirection } from "../zoom-ladder";
 import { nextGrid, type GridCache } from "../terrain-grid";
+import { mapHoverDetails, type HoverSources } from "../map-hover";
+import { DEFAULT_MAP_VISIBILITY, mapObjectVisible, type MapVisibility } from "../map-visibility";
 import { RotateCcw } from "lucide-react";
 
 // 地图画布（T-164 R7 预览 / R8 直编 / R9 视口化 / R10 性能与健壮性）。
@@ -52,6 +54,8 @@ interface Props {
   selectedObjects?: Array<{ kind: "building" | "spawn"; index: number }>;
   /** 建筑 key 到画布短标识；缺省回退为 key 前三个字符。 */
   buildingAbbreviations?: Record<string, string>;
+  hoverSources?: HoverSources;
+  visibility?: MapVisibility;
   /** R22：预览模式点按已放置对象 → 选中（面板负责切换对应模式） */
   onSelectObject?(sel: { kind: "building" | "spawn"; index: number } | null): void;
   onSelectObjects?(sels: Array<{ kind: "building" | "spawn"; index: number }>): void;
@@ -87,14 +91,13 @@ function clampView(value: number, dim: number, visible: number): number {
   return Math.max(-8, Math.min(dim + 8 - Math.max(1, visible), value));
 }
 
-export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topdown", readOnly = false, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, selectedObjects, buildingAbbreviations, onSelectObject, onSelectObjects, onChangeObjectTeam, onChangeObjectsTeam, onMoveObject, onMoveObjects }: Props) {
+export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topdown", readOnly = false, onTerrainRect, onBoxAdd, onPlaceAt, onDeleteAt, onEntityContext, onToolCancel, overlayBar, selected, selectedObjects, buildingAbbreviations, hoverSources, visibility = DEFAULT_MAP_VISIBILITY, onSelectObject, onSelectObjects, onChangeObjectTeam, onChangeObjectsTeam, onMoveObject, onMoveObjects }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
   const [size, setSize] = useState({ w: 560, h: 480 });
   const [viewport, setViewport] = useState<Viewport>({ ox: 0, oy: 0, zoom: 1 });
   const [hover, setHover] = useState<HoverInfo | null>(null);
-  const [staticTick, setStaticTick] = useState(0);
   const [backgroundImage, setBackgroundImage] = useState<{ src: string; image: HTMLImageElement } | null>(null);
   const [backgroundLoadError, setBackgroundLoadError] = useState<string | null>(null);
   const projectionY = projection === "tilt" ? 0.75 : 1;
@@ -146,6 +149,32 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   } | null>(null);
   const [objectGhost, setObjectGhost] = useState<Array<{ x: number; y: number; w: number; h: number }> | null>(null);
   const panRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const buildingRows = doc?.buildings;
+  const spawnRows = doc?.spawns;
+  const decorRows = doc?.decor;
+  const boxRows = doc?.box_mode;
+  const initSpawns = doc?.init && typeof doc.init === "object" && !Array.isArray(doc.init) ? doc.init.spawns : undefined;
+  // Field-tree edits preserve untouched arrays. Naming a map or changing a
+  // definition override must not invalidate its unchanged canvas bitmap.
+  const drawingData = useMemo(() => ({ buildings: buildingRows, spawns: spawnRows, decor: decorRows, boxes: boxRows, initSpawns }),
+    [buildingRows, spawnRows, decorRows, boxRows, initSpawns]);
+  useEffect(() => {
+    // A display change must not leave a drag operating on an invisible layer.
+    dragRef.current = null;
+    objectDragRef.current = null;
+    panRef.current = null;
+    setDragPreview(null);
+    setObjectGhost(null);
+  }, [visibility]);
+
+  const selectionVisible = useCallback((selection: { kind: "building" | "spawn"; index: number }) => {
+    const rows = selection.kind === "building" ? buildingRows : spawnRows;
+    const row = Array.isArray(rows) ? rows[selection.index] : null;
+    return !!row && typeof row === "object" && !Array.isArray(row)
+      && mapObjectVisible(visibility, selection.kind, row as Entity);
+  }, [buildingRows, spawnRows, visibility]);
+  const visibleSelections = useMemo(() => (selectedObjects ?? (selected ? [selected] : [])).filter(selectionVisible),
+    [selectedObjects, selected, selectionVisible]);
 
   const mapW = typeof doc?.width === "number" && Number.isFinite(doc.width) && doc.width >= 1 ? Math.floor(Math.min(doc.width, 512)) : 0;
   const mapH = typeof doc?.height === "number" && Number.isFinite(doc.height) && doc.height >= 1 ? Math.floor(Math.min(doc.height, 512)) : 0;
@@ -231,7 +260,11 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     );
     gridRef.current = cache;
     return cache.grid;
-  }, [doc, mapW, mapH]);
+  }, [doc?.default_terrain, doc?.terrain_patches, mapW, mapH]);
+
+  const hoverDetails = useMemo(() => doc && hover ? mapHoverDetails(doc, hover.x, hover.y,
+    terrainAt[hover.y * mapW + hover.x], { ...hoverSources, backgroundPath: image ? hoverSources?.backgroundPath : undefined }) : null,
+  [doc, hover, terrainAt, mapW, hoverSources, image]);
 
   // —— 静态层：地形/网格/边框/decor/建筑/出生点/box 逐格图标 → 离屏 canvas ——
   const staticBuildsRef = useRef(0);
@@ -262,15 +295,15 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     const cx1 = Math.min(mapW - 1, Math.ceil(viewport.ox + size.w / ppc));
     const cy1 = Math.min(mapH - 1, Math.ceil(viewport.oy + size.h / (ppc * projectionY)));
 
-    if (image) ctx.drawImage(image, sx(0), sy(0), mapW * ppc, mapH * ppc);
-    for (let cy = cy0; !image && cy <= cy1; cy++) {
+    if (image && !visibility.hideBackground) ctx.drawImage(image, sx(0), sy(0), mapW * ppc, mapH * ppc);
+    for (let cy = cy0; !image && !visibility.hideBackground && cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
         ctx.fillStyle = TERRAIN_COLORS[terrainAt[cy * mapW + cx]] ?? "#c0392b";
         ctx.fillRect(Math.floor(sx(cx)), Math.floor(sy(cy)), Math.ceil(ppc) + 1, Math.ceil(ppc) + 1);
       }
     }
     const minor = ppc >= 5;
-    for (let cx = cx0; cx <= cx1 + 1; cx++) {
+    for (let cx = cx0; !visibility.hideGrid && cx <= cx1 + 1; cx++) {
       const major = cx % 8 === 0;
       if (!minor && !major) continue;
       ctx.strokeStyle = major ? "rgba(0,0,0,0.4)" : "rgba(0,0,0,0.16)";
@@ -280,7 +313,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       ctx.lineTo(Math.floor(sx(cx)) + 0.5, Math.min(size.h / projectionY, sy(mapH)));
       ctx.stroke();
     }
-    for (let cy = cy0; cy <= cy1 + 1; cy++) {
+    for (let cy = cy0; !visibility.hideGrid && cy <= cy1 + 1; cy++) {
       const major = cy % 8 === 0;
       if (!minor && !major) continue;
       ctx.strokeStyle = major ? "rgba(0,0,0,0.4)" : "rgba(0,0,0,0.16)";
@@ -294,17 +327,17 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     ctx.lineWidth = 1.5;
     ctx.strokeRect(sx(0), sy(0), mapW * ppc, mapH * ppc);
     // R22：选中对象高亮（建筑=加粗光圈描边；出生点=光圈菱形）
-    const selections = selectedObjects ?? (selected ? [selected] : []);
-    if (selections.length > 0 && doc) {
+    const selections = visibleSelections;
+    if (selections.length > 0) {
       ctx.save();
       ctx.strokeStyle = "#5aabff";
       ctx.lineWidth = Math.max(2, ppc * 0.09);
       for (const selection of selections) {
-        if (selection.kind === "building" && Array.isArray(doc.buildings)) {
-          const raw = (doc.buildings as Array<Record<string, JsonValue>>)[selection.index];
+        if (selection.kind === "building" && Array.isArray(drawingData.buildings)) {
+          const raw = (drawingData.buildings as Array<Record<string, JsonValue>>)[selection.index];
           if (raw && typeof raw === "object") ctx.strokeRect(sx(Number(raw.x)) - 2, sy(Number(raw.y)) - 2, Math.max(1, Number(raw.w ?? 1)) * ppc + 4, Math.max(1, Number(raw.h ?? 1)) * ppc + 4);
-        } else if (selection.kind === "spawn" && Array.isArray(doc.spawns)) {
-          const raw = (doc.spawns as Array<Record<string, JsonValue>>)[selection.index];
+        } else if (selection.kind === "spawn" && Array.isArray(drawingData.spawns)) {
+          const raw = (drawingData.spawns as Array<Record<string, JsonValue>>)[selection.index];
           if (raw && typeof raw === "object") {
             const px2 = sx(Number(raw.x) + 0.5);
             const py2 = sy(Number(raw.y) + 0.5);
@@ -316,9 +349,9 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       ctx.restore();
     }
 
-    if (doc && Array.isArray(doc.decor)) {
+    if (!visibility.hideRender && Array.isArray(drawingData.decor)) {
       ctx.fillStyle = "#1f5c25";
-      for (const entry of doc.decor) {
+      for (const entry of drawingData.decor) {
         if (entry === null || typeof entry !== "object") continue;
         const d = entry as Record<string, JsonValue>;
         const x = Number(d.x);
@@ -329,13 +362,14 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         ctx.fill();
       }
     }
-    if (doc && Array.isArray(doc.buildings)) {
+    if (Array.isArray(drawingData.buildings)) {
       const abbreviations = buildingAbbreviations ?? {};
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      for (const entry of doc.buildings) {
+      for (const entry of drawingData.buildings) {
         if (entry === null || typeof entry !== "object") continue;
         const b = entry as Record<string, JsonValue>;
+        if (!mapObjectVisible(visibility, "building", b)) continue;
         const x = Number(b.x);
         const y = Number(b.y);
         const w = Number(b.w);
@@ -365,9 +399,9 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       }
     }
     const spawnLists: Array<[Array<unknown>, string]> = [];
-    if (doc && Array.isArray(doc.spawns)) spawnLists.push([doc.spawns as Array<unknown>, "#ffffff"]);
-    if (doc && doc.init !== null && typeof doc.init === "object" && Array.isArray((doc.init as Entity).spawns)) {
-      spawnLists.push([(doc.init as Entity).spawns as Array<unknown>, "#ffe9a8"]);
+    if (Array.isArray(drawingData.spawns)) spawnLists.push([drawingData.spawns as Array<unknown>, "#ffffff"]);
+    if (Array.isArray(drawingData.initSpawns)) {
+      spawnLists.push([drawingData.initSpawns as Array<unknown>, "#ffe9a8"]);
     }
     for (const [list, color] of spawnLists) {
       ctx.strokeStyle = color;
@@ -375,6 +409,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       for (const entry of list) {
         if (entry === null || typeof entry !== "object") continue;
         const s = entry as Record<string, JsonValue>;
+        if (!mapObjectVisible(visibility, "spawn", s)) continue;
         const x = Number(s.x);
         const y = Number(s.y);
         if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= mapW || y >= mapH) continue;
@@ -390,8 +425,8 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         ctx.stroke();
       }
     }
-    if (doc && Array.isArray(doc.box_mode)) {
-      for (const entry of doc.box_mode) {
+    if (!visibility.hideBoxes && Array.isArray(drawingData.boxes)) {
+      for (const entry of drawingData.boxes) {
         if (entry === null || typeof entry !== "object") continue;
         const b = entry as Record<string, JsonValue>;
         const start = b.start as Record<string, JsonValue> | undefined;
@@ -407,9 +442,10 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         const inset = ppc * 0.28;
         const arm = ppc * 0.22;
         const lw = Math.max(1, ppc * 0.055);
-        for (let cy = by0; cy <= by1; cy++) {
-          for (let cx = bx0; cx <= bx1; cx++) {
-            if (cx < cx0 || cx > cx1 || cy < cy0 || cy > cy1) continue;
+        // Large rectangles can cover the whole map. Iterate only the visible
+        // intersection rather than visiting every offscreen cell to skip it.
+        for (let cy = Math.max(by0, cy0); cy <= Math.min(by1, cy1); cy++) {
+          for (let cx = Math.max(bx0, cx0); cx <= Math.min(bx1, cx1); cx++) {
             const left = sx(cx);
             const top = sy(cy);
             const right = left + ppc;
@@ -452,22 +488,24 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         }
       }
     }
-  }, [doc, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, selected, selectedObjects, dpr, image, projectionY, buildingAbbreviations]);
+    // Update the probe at the same time as its bitmap. A state tick used to
+    // commit React again and composite the same pan frame a second time.
+    if (canvasRef.current) canvasRef.current.dataset.staticBuilds = String(staticBuildsRef.current);
+  }, [drawingData, mapW, mapH, size, viewport, ppc, terrainAt, iconTick, visibleSelections, visibility, dpr, image, projectionY, buildingAbbreviations]);
 
   // R31：静态层重建只随「真正影响它的输入」发生。旧版把 rebuildStatic 的 useCallback 直接
   // 喂给 effect 依赖数组，而该回调依赖整份组件闭包——hover/dragPreview/objectGhost 任何一次
   // 变动都重建整张离屏位图（含重设 width 触发的位图重分配），鼠标划过画布即 GPU 风暴。
   // 这里改为按字段拆开的原始值依赖：指针层 state 一律不入列。
   const staticDeps = [
-    doc, mapW, mapH, size.w, size.h, dpr,
+    drawingData, mapW, mapH, size.w, size.h, dpr,
     viewport.ox, viewport.oy, ppc,
     terrainAt, iconTick, image, projectionY, buildingAbbreviations,
-    selected?.kind, selected?.index, selectedObjects,
+    visibleSelections, visibility,
   ];
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     rebuildStatic();
-    setStaticTick((tick) => tick + 1);
   }, staticDeps);
 
   // —— 合成层：静态层位图 + 悬停/拖拽动态层（每次 setState 只做一次 drawImage）——
@@ -492,7 +530,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     const sy = (cy: number) => (cy - viewport.oy) * ppc;
     if (hover) {
       // 建筑工具：悬停幽灵 = 放置占地（footprintW×H，越界红、可放绿白）
-      if (!readOnly && tool.tool === "building") {
+      if (!readOnly && tool.tool === "building" && mapObjectVisible(visibility, "building", { key: tool.buildingKey, team: tool.team })) {
         const fw = Math.max(1, Math.floor(tool.footprintW));
         const fh = Math.max(1, Math.floor(tool.footprintH));
         const fits = hover.x + fw <= mapW && hover.y + fh <= mapH;
@@ -533,7 +571,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       ctx.lineWidth = 1.5;
       ctx.strokeRect(sx(left) + 0.75, sy(top) + 0.75, (right - left) * ppc - 1.5, (bottom - top) * ppc - 1.5);
     }
-  }, [staticTick, hover, dragPreview, objectGhost, tool, size, mapW, mapH, viewport, ppc, projectionY, readOnly, dpr]);
+  }, [rebuildStatic, hover, dragPreview, objectGhost, tool, size, mapW, mapH, viewport, ppc, projectionY, readOnly, dpr, visibility]);
 
   // 滚轮缩放（非被动，锚定光标）——R31 改整数档位（见 zoom-ladder.ts，修旧版单调性缺陷）
   useEffect(() => {
@@ -572,10 +610,41 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     return () => window.removeEventListener("resize", read);
   }, []);
 
+  /** R22：格命中已放置对象（建筑优先于出生点），返回 kind/index/锚点/尺寸 */
+  const hitObject = useCallback((cell: { x: number; y: number }): { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number } | null => {
+    if (!doc) return null;
+    if (Array.isArray(doc.buildings)) {
+      for (let i = doc.buildings.length - 1; i >= 0; i -= 1) {
+        const raw = doc.buildings[i];
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const b = raw as Record<string, JsonValue>;
+        if (!mapObjectVisible(visibility, "building", b)) continue;
+        const x = Number(b.x);
+        const y = Number(b.y);
+        const w = Math.max(1, Number(b.w ?? 1));
+        const h = Math.max(1, Number(b.h ?? 1));
+        if (Number.isFinite(x) && Number.isFinite(y) && cell.x >= x && cell.y >= y && cell.x < x + w && cell.y < y + h) {
+          return { kind: "building", index: i, x, y, w, h };
+        }
+      }
+    }
+    if (Array.isArray(doc.spawns)) {
+      for (let i = doc.spawns.length - 1; i >= 0; i -= 1) {
+        const raw = doc.spawns[i];
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const sp = raw as Record<string, JsonValue>;
+        if (!mapObjectVisible(visibility, "spawn", sp)) continue;
+        if (Number(sp.x) === cell.x && Number(sp.y) === cell.y) {
+          return { kind: "spawn", index: i, x: cell.x, y: cell.y, w: 1, h: 1 };
+        }
+      }
+    }
+    return null;
+  }, [doc, visibility]);
+
   // R29：对象悬停快捷换队。只接管主键盘 Digit1~Digit9（event.code 明确排除
   // 小键盘 Numpad1~Numpad9），且仅在预览/单位移动模式生效；输入控件聚焦时不抢键。
-  // 这里重复一段轻量命中逻辑而不依赖 hitObject：hitObject 位于画布的条件 return
-  // 之后，直接引用会让无地图状态下的 hook/闭包顺序变得脆弱。
+  // 绘制、鼠标命中和键盘批量目标共享可见性规则，始终保留原文档索引。
   useEffect(() => {
     if (readOnly || (tool.tool !== "none" && tool.tool !== "move-unit")) return;
     const onKey = (event: KeyboardEvent) => {
@@ -583,39 +652,12 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       if (!/^Digit[1-9]$/.test(event.code)) return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (!doc || (!hover && (!selectedObjects || selectedObjects.length < 2)) || (!onChangeObjectTeam && !onChangeObjectsTeam)) return;
-      const cell = hover;
-      let hit: { kind: "building" | "spawn"; index: number } | null = null;
-      if (cell && Array.isArray(doc.buildings)) {
-        for (let i = doc.buildings.length - 1; i >= 0; i -= 1) {
-          const raw = doc.buildings[i];
-          if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-          const b = raw as Record<string, JsonValue>;
-          const x = Number(b.x);
-          const y = Number(b.y);
-          const w = Math.max(1, Number(b.w ?? 1));
-          const h = Math.max(1, Number(b.h ?? 1));
-          if (Number.isFinite(x) && Number.isFinite(y) && cell.x >= x && cell.y >= y && cell.x < x + w && cell.y < y + h) {
-            hit = { kind: "building", index: i };
-            break;
-          }
-        }
-      }
-      if (!hit && cell && Array.isArray(doc.spawns)) {
-        for (let i = doc.spawns.length - 1; i >= 0; i -= 1) {
-          const raw = doc.spawns[i];
-          if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-          const s = raw as Record<string, JsonValue>;
-          if (Number(s.x) === cell.x && Number(s.y) === cell.y) {
-            hit = { kind: "spawn", index: i };
-            break;
-          }
-        }
-      }
+      if (!doc || (!hover && visibleSelections.length < 2) || (!onChangeObjectTeam && !onChangeObjectsTeam)) return;
+      const hit = hover ? hitObject(hover) : null;
       // A single stale selection must not steal the shortcut from the object
       // currently under the cursor.  Only an explicit Shift multi-selection
       // is treated as a batch; otherwise the hover hit is authoritative.
-      const targets = selectedObjects && selectedObjects.length > 1 ? selectedObjects : (hit ? [hit] : []);
+      const targets = visibleSelections.length > 1 ? visibleSelections : (hit ? [hit] : []);
       if (targets.length === 0) return;
       if (onChangeObjectsTeam) onChangeObjectsTeam(targets, Number(event.key));
       else for (const targetItem of targets) onChangeObjectTeam?.(targetItem, Number(event.key));
@@ -624,7 +666,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [doc, hover, onChangeObjectTeam, onChangeObjectsTeam, readOnly, selectedObjects, tool.tool]);
+  }, [doc, hover, hitObject, onChangeObjectTeam, onChangeObjectsTeam, readOnly, visibleSelections, tool.tool]);
 
   if (!doc || mapW === 0 || mapH === 0) {
     return <div className="map-canvas empty">（缺 width/height，无法预览）</div>;
@@ -656,7 +698,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     if (!doc) return null;
     if (tool.tool === "move-shape") {
       // 地形模式：先补丁后 box（补丁在上层绘制）
-      if (!image && Array.isArray(doc.terrain_patches)) {
+      if (!image && !visibility.hideBackground && Array.isArray(doc.terrain_patches)) {
         for (let i = (doc.terrain_patches as Array<Record<string, JsonValue>>).length - 1; i >= 0; i -= 1) {
           const raw = (doc.terrain_patches as Array<Record<string, JsonValue>>)[i];
           if (!raw || typeof raw !== "object") continue;
@@ -669,7 +711,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
           }
         }
       }
-      if (Array.isArray(doc.box_mode)) {
+      if (!visibility.hideBoxes && Array.isArray(doc.box_mode)) {
         for (let i = (doc.box_mode as Array<Record<string, JsonValue>>).length - 1; i >= 0; i -= 1) {
           const raw = (doc.box_mode as Array<Record<string, JsonValue>>)[i];
           if (!raw || typeof raw !== "object") continue;
@@ -688,7 +730,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       return null;
     }
     if (tool.tool === "move-render") {
-      if (Array.isArray(doc.decor)) {
+      if (!visibility.hideRender && Array.isArray(doc.decor)) {
         for (let i = (doc.decor as Array<Record<string, JsonValue>>).length - 1; i >= 0; i -= 1) {
           const raw = (doc.decor as Array<Record<string, JsonValue>>)[i];
           if (!raw || typeof raw !== "object") continue;
@@ -701,36 +743,6 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
     }
     // move-unit / none：建筑 → 出生点
     return hitObject(cell);
-  };
-
-  /** R22：格命中已放置对象（建筑优先于出生点），返回 kind/index/锚点/尺寸 */
-  const hitObject = (cell: { x: number; y: number }): { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number } | null => {
-    if (!doc) return null;
-    if (Array.isArray(doc.buildings)) {
-      for (let i = doc.buildings.length - 1; i >= 0; i -= 1) {
-        const raw = doc.buildings[i];
-        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const b = raw as Record<string, JsonValue>;
-        const x = Number(b.x);
-        const y = Number(b.y);
-        const w = Math.max(1, Number(b.w ?? 1));
-        const h = Math.max(1, Number(b.h ?? 1));
-        if (Number.isFinite(x) && Number.isFinite(y) && cell.x >= x && cell.y >= y && cell.x < x + w && cell.y < y + h) {
-          return { kind: "building", index: i, x, y, w, h };
-        }
-      }
-    }
-    if (Array.isArray(doc.spawns)) {
-      for (let i = doc.spawns.length - 1; i >= 0; i -= 1) {
-        const raw = doc.spawns[i];
-        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const sp = raw as Record<string, JsonValue>;
-        if (Number(sp.x) === cell.x && Number(sp.y) === cell.y) {
-          return { kind: "spawn", index: i, x: cell.x, y: cell.y, w: 1, h: 1 };
-        }
-      }
-    }
-    return null;
   };
 
   /** R22：开始对象拖动（抓取偏移保留） */
@@ -750,6 +762,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const source = item.kind === "building" ? buildings[item.index] : spawns[item.index];
       if (!source || typeof source !== "object" || Array.isArray(source)) return null;
       const row = source as Record<string, JsonValue>;
+      if (!mapObjectVisible(visibility, item.kind, row)) return null;
       const x = Number(row.x); const y = Number(row.y);
       const w = Number(row.w ?? 1); const h = Number(row.h ?? 1);
       if (![x, y, w, h].every(Number.isFinite) || w < 1 || h < 1) return null;
@@ -798,7 +811,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const hit = cell ? hitMovable(cell) : null;
       if (hit && cell) {
         const nextSelection = hit.kind === "building" || hit.kind === "spawn" ? { kind: hit.kind, index: hit.index } : null;
-        const current = selectedObjects ?? [];
+        const current = visibleSelections;
         if (nextSelection && event.shiftKey) {
           const objectHit = hit as { kind: "building" | "spawn"; index: number; x: number; y: number; w: number; h: number };
           const exists = current.some((item) => item.kind === nextSelection.kind && item.index === nextSelection.index);
@@ -829,9 +842,9 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
       const hit = cell ? hitObject(cell) : null;
       if (hit && cell) {
         const next = { kind: hit.kind, index: hit.index } as { kind: "building" | "spawn"; index: number };
-        if (event.shiftKey && selectedObjects) {
-          const exists = selectedObjects.some((item) => item.kind === next.kind && item.index === next.index);
-          const nextSelection = exists ? selectedObjects.filter((item) => item.kind !== next.kind || item.index !== next.index) : [...selectedObjects, next];
+        if (event.shiftKey) {
+          const exists = visibleSelections.some((item) => item.kind === next.kind && item.index === next.index);
+          const nextSelection = exists ? visibleSelections.filter((item) => item.kind !== next.kind || item.index !== next.index) : [...visibleSelections, next];
           onSelectObjects?.(nextSelection);
         } else {
           onSelectObjects?.([next]);
@@ -856,20 +869,31 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   };
 
   const onMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const updateHover = (cell: { x: number; y: number } | null) => {
+      if (!cell) { if (hover) setHover(null); return; }
+      const terrain = terrainAt[cell.y * mapW + cell.x];
+      if (!hover || hover.x !== cell.x || hover.y !== cell.y || hover.terrain !== terrain) setHover({ ...cell, terrain });
+    };
     if (panRef.current) {
       // 原点先拷局部：setState 更新器必须纯——批处理下其执行可能晚于 mouseup（panRef
       // 已置空），在更新器里读 ref 即 "Cannot read properties of null (reading 'ox')"
       const pan = panRef.current;
       const dx = (event.clientX - pan.x) / ppc;
       const dy = (event.clientY - pan.y) / (ppc * projectionY);
-      setViewport((prev) => ({
-        ...prev,
+      const nextViewport = {
+        ...viewport,
         ox: clampView(pan.ox - dx, mapW, size.w / ppc),
         oy: clampView(pan.oy - dy, mapH, size.h / (ppc * projectionY)),
-      }));
+      };
+      setViewport(nextViewport);
+      const rect = event.currentTarget.getBoundingClientRect();
+      const x = Math.floor((event.clientX - rect.left) / ppc + nextViewport.ox);
+      const y = Math.floor((event.clientY - rect.top) / (ppc * projectionY) + nextViewport.oy);
+      updateHover(x >= 0 && y >= 0 && x < mapW && y < mapH ? { x, y } : null);
       return;
     }
     const cell = localCell(event.clientX, event.clientY);
+    updateHover(cell);
     // R22：对象移动拖动——目标锚点 = 原始格 - 抓取偏移，钳制到图界（越界红幽灵）
     if (objectDragRef.current) {
       const raw0 = rawCell(event.clientX, event.clientY);
@@ -919,15 +943,6 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
         dragRef.current = { ...dragRef.current, x1: raw.x, y1: raw.y };
         setDragPreview(dragRef.current);
       }
-    }
-    if (cell) {
-      const terrain = terrainAt[cell.y * mapW + cell.x];
-      // 同格去抖：格内移动不重绘；但地形变化（笔刷刷到脚下）须刷新读数
-      if (!hover || hover.x !== cell.x || hover.y !== cell.y || hover.terrain !== terrain) {
-        setHover({ x: cell.x, y: cell.y, terrain });
-      }
-    } else {
-      setHover(null);
     }
   };
 
@@ -979,7 +994,7 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
   const editable = !readOnly && tool.tool !== "none";
 
   return (
-    <div className="map-canvas-wrap" data-testid="map-canvas">
+    <div className="map-canvas-wrap" data-testid="map-canvas" onMouseLeave={() => setHover(null)}>
       <div className="map-canvas-viewport" ref={wrapRef}>
         {overlayBar ? <div className="map-quickbar">{overlayBar}</div> : null}
         <canvas
@@ -998,12 +1013,14 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
           data-projection={projection}
           data-readonly={readOnly}
           data-background={Boolean(image)}
+          data-visibility={JSON.stringify(visibility)}
           // R31：静态层重建次数（性能回归读数）。鼠标划过画布 100 次后此值应保持不变——
           // 旧实现每次悬停都重建整张离屏位图，读数会随鼠标移动线性增长。
           data-static-builds={staticBuildsRef.current}
           onMouseMove={onMove}
           onMouseLeave={() => {
-            setHover(null);
+            // Keep the inspected cell while the pointer enters the details
+            // panel, so long names and paths can be scrolled and read.
             dragRef.current = null;
             setDragPreview(null);
             panRef.current = null;
@@ -1026,37 +1043,18 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
             if (!onEntityContext) return;
             const cell = localCell(event.clientX, event.clientY);
             if (!cell || !doc) return;
-            if (Array.isArray(doc.buildings)) {
-              for (let i = doc.buildings.length - 1; i >= 0; i -= 1) {
-                const raw = doc.buildings[i];
-                if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-                const b = raw as Record<string, JsonValue>;
-                const x = Number(b.x);
-                const y = Number(b.y);
-                const w = Number(b.w);
-                const h = Number(b.h);
-                if (
-                  Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h) &&
-                  cell.x >= x && cell.y >= y && cell.x < x + w && cell.y < y + h
-                ) {
-                  onEntityContext({ kind: "building", index: i, cell }, { x: event.clientX, y: event.clientY });
-                  return;
-                }
-              }
-            }
-            if (Array.isArray(doc.spawns)) {
-              for (let i = doc.spawns.length - 1; i >= 0; i -= 1) {
-                const raw = doc.spawns[i];
-                if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-                const sp = raw as Record<string, JsonValue>;
-                if (Number(sp.x) === cell.x && Number(sp.y) === cell.y) {
-                  onEntityContext({ kind: "spawn", index: i, cell }, { x: event.clientX, y: event.clientY });
-                  return;
-                }
-              }
-            }
+            const hit = hitObject(cell);
+            if (hit) onEntityContext({ kind: hit.kind, index: hit.index, cell }, { x: event.clientX, y: event.clientY });
           }}
         />
+      </div>
+      <div className="map-hover-inspector" aria-label="地图位置提示" title="显示当前位置的地图静态配置；贴图与渲染效果按地图和渲染配置解析。">
+        {hover && hoverDetails ? <div data-testid="map-hover">
+          <div className="map-hover-row"><strong data-testid="map-hover-coordinates">({hover.x},{hover.y})</strong><span data-testid="map-hover-box" title="通行和建造以 box_mode 为准；重叠区域由后面的条目覆盖。">{hoverDetails.box}</span></div>
+          <div className="map-hover-row" data-testid="map-hover-texture"><b>贴图</b><span>{hoverDetails.texture.join("；") || "无"}</span></div>
+          <div className="map-hover-row" data-testid="map-hover-effects"><b>渲染效果</b><span>{hoverDetails.effects.join("；") || "无"}</span></div>
+          <div className="map-hover-row" data-testid="map-hover-objects"><b>对象</b><span>{hoverDetails.objects.join("；") || "无"}</span></div>
+        </div> : <span className="map-hover-placeholder">将鼠标移到地图上查看坐标、贴图、渲染效果、对象和 box_mode</span>}
       </div>
       <div className="map-canvas-legend">
         {!image ? [0, 1, 2, 3, 4].map((code) => (
@@ -1066,11 +1064,6 @@ export default function MapCanvas({ doc, tool, backgroundUrl, projection = "topd
           </span>
         )) : null}
         <span className="legend-item">┃ 括号=禁建 · X=通行（逐格，与游戏 L2 一致）· 方块=建筑 · ◇=出生点</span>
-        {hover ? (
-          <span className="legend-item" data-testid="map-hover">
-            ({hover.x},{hover.y}){image ? "" : ` 地形 ${hover.terrain}`}
-          </span>
-        ) : null}
         <button
           className="btn slim"
           data-testid="map-view-reset"

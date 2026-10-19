@@ -1,0 +1,31 @@
+/* Keep deletion beside the field name: scalar editors retain their width and
+   the Object inspector remains a two-column property grid. */
+.field-tree .field-row > .field-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.field-label-content { flex: 1 1 0; min-width: 0; }
+.field-tree .field-label-content .label-view { max-width: 100%; }
+.field-tree .field-label-content .md-code { white-space: normal; overflow-wrap: anywhere; }
+.field-tree .field-remove {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: var(--control-h);
+  min-height: var(--control-h);
+  padding: 0;
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+.field-tree .field-remove:hover:not(:disabled),
+.field-tree .field-remove:focus-visible { color: var(--err); background: var(--err-bg); border-color: var(--border); }
+.field-tree .field-remove:disabled { opacity: .25; cursor: not-allowed; }
+
+.rules .rule-value-content { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rules .rule-value-content > .rule-remove { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; }

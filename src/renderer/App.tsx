@@ -17,6 +17,7 @@ export default function App() {
   const busyRef = useRef(false);
   const setBusy = useCallback((value: boolean) => { busyRef.current = value; setBusyState(value); }, []);
   const [mapBusy, setMapBusy] = useState(false);
+  const [mapSaving, setMapSaving] = useState(false);
   const [dirty, setDirty] = useState(0);
   const [configBusy, setConfigBusy] = useState(false);
   const [configDirty, setConfigDirty] = useState(0);
@@ -38,14 +39,16 @@ export default function App() {
   const configs = useRef<ConfigsPanelHandle | null>(null);
   const closeRef = useRef<() => void>(() => {});
   const isWorking = () => busyRef.current || Boolean(maps.current?.isBusy()) || Boolean(configs.current?.isBusy());
+  const isEditingBlocked = () => busyRef.current
+    || Boolean(maps.current?.isEditingBlocked()) || Boolean(configs.current?.isBusy());
   const selectSection = (next: "maps" | Kind) => {
-    if (isWorking()) return;
+    if (isEditingBlocked()) return;
     if (next !== "maps") setConfigKind(next);
     setSection(next);
   };
   const configSaved = useCallback((kind: Kind, data: ConfigFile) => {
     if (kind === "units") setUnits(Array.isArray(data.units) ? data.units as Entity[] : null);
-    if (kind === "buildings") setConfigVersion((value) => value + 1);
+    setConfigVersion((value) => value + 1);
   }, []);
 
   useEffect(() => {
@@ -88,7 +91,7 @@ export default function App() {
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !isWorking()) setDialog(null);
-      if (!workspace || dialog || isWorking() || !(event.ctrlKey || event.metaKey)) return;
+      if (!workspace || dialog || isEditingBlocked() || !(event.ctrlKey || event.metaKey)) return;
       const editor = section === "maps" ? maps.current : configs.current;
       const key = event.key.toLowerCase();
       if (["s", "z", "y"].includes(key)) event.preventDefault();
@@ -98,7 +101,7 @@ export default function App() {
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [workspace, dialog, busy, section, mapBusy, configBusy]);
+  }, [workspace, dialog, busy, section, mapBusy, mapSaving, configBusy]);
 
   const open = async (browse = false) => {
     if (isWorking()) return;
@@ -153,7 +156,7 @@ export default function App() {
   const reselect = async () => {
     if (isWorking()) return;
     configs.current?.flushPendingEdits();
-    if ((dirty || configs.current?.getDirtyKinds().length) && !window.confirm("有未保存的地图或配置修改，返回目录选择将丢弃，确认？")) return;
+    if ((maps.current?.isAnyDirty() || configs.current?.getDirtyKinds().length) && !window.confirm("有未保存的地图或配置修改，返回目录选择将丢弃，确认？")) return;
     setBusy(true);
     try {
       const result = await api.closeWorkspace();
@@ -175,7 +178,7 @@ export default function App() {
   closeRef.current = () => {
     if (isWorking()) return;
     configs.current?.flushPendingEdits();
-    if (dirty || configs.current?.getDirtyKinds().length) setDialog("close"); else void windowControl("close-now");
+    if (maps.current?.isAnyDirty() || configs.current?.getDirtyKinds().length) setDialog("close"); else void windowControl("close-now");
   };
 
   useEffect(() => {
@@ -269,11 +272,11 @@ export default function App() {
       </div>
     </main> : <>
       <div className="workspace-toolbar" data-testid="workspace-bar">
-        <button className="btn icon-btn" title="重新选择地图目录" data-testid="workspace-reselect" onClick={() => void reselect()} disabled={busy || mapBusy || configBusy}><ArrowLeft size={16} /></button>
+        <button className="btn icon-btn" title="重新选择地图目录" data-testid="workspace-reselect" onClick={() => void reselect()} disabled={busy || mapBusy || mapSaving || configBusy}><ArrowLeft size={16} /></button>
         <div className="workspace-location"><strong title={workspace.root}>{workspace.root}</strong><span title={workspace.baseline.zipPath}>本次备份 {new Date(workspace.baseline.createdAt).toLocaleString()} · {workspace.baseline.fileCount} 文件 · {(workspace.baseline.totalBytes / 1024 / 1024).toFixed(1)} MiB{workspace.offline ? " · 离线地图目录" : ""}</span></div>
-        <button className="btn" data-testid="workspace-compare" disabled={busy || mapBusy || configBusy} onClick={() => void showDiff("compare")}><GitCompareArrows size={16} />地图目录对比</button>
-        <button className="btn danger" data-testid="workspace-restore" disabled={busy || mapBusy || configBusy} onClick={() => void showDiff("restore")}><RotateCcw size={16} />地图完全恢复</button>
-        <button className="btn primary" data-testid="save-btn" title={section === "maps" ? "保存当前地图" : `保存 ${section}.json`} disabled={busy || mapBusy || configBusy} onClick={() => { if (isWorking()) return; void (section === "maps" ? maps.current?.save() : configs.current?.save()); }}><Save size={16} />保存</button>
+        <button className="btn" data-testid="workspace-compare" disabled={busy || mapBusy || mapSaving || configBusy} onClick={() => void showDiff("compare")}><GitCompareArrows size={16} />地图目录对比</button>
+        <button className="btn danger" data-testid="workspace-restore" disabled={busy || mapBusy || mapSaving || configBusy} onClick={() => void showDiff("restore")}><RotateCcw size={16} />地图完全恢复</button>
+        <button className="btn primary" data-testid="save-btn" title={section === "maps" ? "保存当前地图（后台保存中可再次提交最新修改）" : `保存 ${section}.json`} disabled={busy || mapBusy || configBusy} onClick={() => { if (isEditingBlocked()) return; void (section === "maps" ? maps.current?.save() : configs.current?.save()); }}><Save size={16} />保存</button>
       </div>
       <nav className="workspace-bar workspace-tabs">
         <button className={`tab${section === "maps" ? " active" : ""}`} data-testid="tab-maps" disabled={busy || mapBusy || configBusy} onClick={() => selectSection("maps")}>地图{dirty > 0 ? ` · ${dirty}` : ""}</button>
@@ -281,7 +284,7 @@ export default function App() {
       </nav>
       <main className="content" inert={dialog !== null || busy}>
         <div className={section === "maps" ? "maps-mount" : "maps-mount hidden"}>
-          <MapsPanel key={`${workspace.id}:${workspace.generation}`} workspace={workspace} handleRef={maps} labelsData={labels} onDirtyChange={setDirty} onBusyChange={setMapBusy} unitsCache={units} active={section === "maps"} buildingsVersion={workspace.generation + configVersion} />
+          <MapsPanel key={`${workspace.id}:${workspace.generation}`} workspace={workspace} handleRef={maps} labelsData={labels} onDirtyChange={setDirty} onBusyChange={setMapBusy} onSavingChange={setMapSaving} unitsCache={units} active={section === "maps"} buildingsVersion={workspace.generation + configVersion} />
         </div>
         <div className={section !== "maps" ? "configs-mount" : "configs-mount hidden"}>
           <ConfigsPanel key={workspace.id} workspace={workspace} kind={configKind} active={section !== "maps"} labelsData={labels} handleRef={configs} onDirtyChange={setConfigDirty} onBusyChange={setConfigBusy} onSaved={configSaved} />

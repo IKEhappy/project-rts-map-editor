@@ -96,7 +96,7 @@ test('imageInfo accepts JPG/JPEG dimensions and importImage retains the source e
 
 test('backgroundInfo gives a valid map background precedence over renderer config and reports missing views', (t) => {
   const f = setup(t);
-  const renderer = f.write(f.maps, 'renderer.json', JSON.stringify({ background: { tilt: 'res://data/maps/renderer.png' } }));
+  const renderer = f.write(f.maps, 'renderer.json', JSON.stringify({ background: { tilt: 'res://data/maps/renderer.png' }, materials: { snow: { water: 'res://assets/water_ice/' } } }));
   f.write(f.maps, 'renderer.png', png(8, 8));
   f.write(f.maps, 'map.png', png(2, 3));
   const map = {
@@ -108,8 +108,68 @@ test('backgroundInfo gives a valid map background precedence over renderer confi
   assert.equal(result.ok, false, 'unknown key is a schema error');
   assert.equal(result.images.topdown.width, 2);
   assert.equal(result.images.tilt, undefined, 'map block is whole-block precedence; renderer tilt is not merged');
+  assert.deepEqual(result.renderConfig, { materials: { snow: { water: 'res://assets/water_ice/' } } }, 'map background precedence does not hide renderer metadata');
   assert.match(result.errors.join('\n'), /未知 background 字段/);
   assert.equal(fs.existsSync(renderer), true);
+});
+
+test('backgroundInfo exposes only typed render fields and permitted resource paths', (t) => {
+  const f = setup(t);
+  f.write(f.maps, 'renderer.json', JSON.stringify({
+    version: 1,
+    private_notes: 'must not reach the renderer',
+    scripts: ['res://scripts/unsafe.gd'],
+    materials: {
+      snow: {
+        textures: ['res://assets/snow.png', 'file:///private.txt', 'res://data/../private.txt', 42],
+        cliff: 'res://assets/cliff_snow/',
+        water: 'res://assets/water_ice/',
+        transition: { grass: 'res://assets/snow/t_grass/', secret: 'private file contents' },
+        private_notes: 'material secret',
+      },
+      malformed: 'material must be an object',
+    },
+    scatter: {
+      grass: { kind: 'grass_tuft', density: 0.08, materials_on: ['snow', 2], hash_salt: 101, variants: 3, hide_when_snow: true, private_notes: 'scatter secret' },
+      malformed: [],
+    },
+    weather: { rain: { tint: '#112233' }, snow: { tint: '#ffffff' }, river: {}, reflection: {}, malformed: 'secret' },
+  }));
+  const result = assets.backgroundInfo(f.workspaces, f.session.id, { renderer: 'res://data/maps/renderer.json' }, decoder(2, 3));
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'none');
+  assert.deepEqual(result.renderConfig, {
+    materials: { snow: { textures: ['res://assets/snow.png'], cliff: 'res://assets/cliff_snow/', water: 'res://assets/water_ice/', transition: { grass: 'res://assets/snow/t_grass/' } } },
+    scatter: { grass: { kind: 'grass_tuft', density: 0.08, materials_on: ['snow'], hash_salt: 101, variants: 3, hide_when_snow: true } },
+    weather: ['rain', 'snow'],
+  });
+  assert.doesNotMatch(JSON.stringify(result), /private|secret|scripts|unsafe/);
+});
+
+test('backgroundInfo keeps an absent renderer empty and cannot become a generic JSON read', (t) => {
+  const f = setup(t);
+  const absent = assets.backgroundInfo(f.workspaces, f.session.id, {}, decoder(2, 3));
+  assert.equal(absent.ok, true);
+  assert.equal(absent.renderConfig, undefined, 'no implicit default.json renderer exists in the game');
+  f.write(f.maps, 'unrelated.json', JSON.stringify({ password: 'private-content', nested: { data: 'private-content' } }));
+  const unrelated = assets.backgroundInfo(f.workspaces, f.session.id, { renderer: 'res://data/maps/unrelated.json' }, decoder(2, 3));
+  assert.deepEqual(unrelated.renderConfig, {});
+  assert.doesNotMatch(JSON.stringify(unrelated), /password|private-content|nested/);
+});
+
+test('renderer metadata failures remain visible even with an explicit usable map background', (t) => {
+  const f = setup(t);
+  f.write(f.maps, 'map.png', png(2, 3));
+  f.write(f.maps, 'bad.json', '{invalid JSON');
+  f.write(f.maps, 'large.json', Buffer.alloc(assets.MAX_BYTES + 1, 32));
+  for (const ref of ['file:///outside.json', 'res://scripts/outside.json', 'res://data/maps/../outside.json', 'res://data/maps/missing.json', 'res://data/maps/bad.json', 'res://data/maps/large.json']) {
+    const result = assets.backgroundInfo(f.workspaces, f.session.id, { renderer: ref, background: { image: 'res://data/maps/map.png' } }, decoder(2, 3));
+    assert.equal(result.ok, false, ref);
+    assert.equal(result.source, 'map');
+    assert.equal(result.images.image.width, 2);
+    assert.equal(result.renderConfig, undefined);
+    assert.match(result.errors.join('\n'), /renderer：/);
+  }
 });
 
 test('renderer background is used only when map background is absent, and empty renderer background is a valid no-image result', (t) => {

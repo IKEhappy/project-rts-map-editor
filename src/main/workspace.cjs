@@ -147,6 +147,38 @@ function publicSession(session) {
   });
 }
 
+function checkedRoot(session, id) {
+  if (id !== undefined && id !== session.id) throw new Error('Workspace session has expired');
+  assertNoLinks(session.root);
+  if (!fs.existsSync(session.root) || !samePath(fs.realpathSync.native(session.root), session.root)) throw new Error('Workspace folder was moved or replaced');
+  return session;
+}
+
+function workspaceFile(session, relative, { mustExist = false } = {}) {
+  const safe = relativeName(relative);
+  const full = path.join(session.root, ...safe.split('/'));
+  if (!inside(session.root, full)) throw new Error('Path is outside the selected map folder');
+  assertNoLinks(full);
+  if (mustExist && !fs.existsSync(full)) throw new Error(`Workspace file does not exist: ${safe}`);
+  if (fs.existsSync(full) && !inside(session.root, fs.realpathSync.native(full))) throw new Error('Workspace path escapes its root');
+  return full;
+}
+
+// Only the main process creates this descriptor, after checking its live session.
+// Workers share the main process's lock and cannot open, restore or switch folders.
+function createBoundWorkspace(descriptor) {
+  const session = publicSession(descriptor);
+  for (const key of ['root', 'projectRoot', 'dataDir']) {
+    if (typeof session[key] !== 'string' || !path.isAbsolute(session[key])) throw new Error('Invalid bound workspace');
+  }
+  if (!session.id || !Number.isSafeInteger(session.generation) || !/^res:\/\/(data|assets)\/.+/.test(session.resPrefix)) throw new Error('Invalid bound workspace');
+  checkedRoot(session);
+  return {
+    current(id) { return publicSession(checkedRoot(session, id)); },
+    file(id, relative, options) { return workspaceFile(checkedRoot(session, id), relative, options); },
+  };
+}
+
 class WorkspaceService {
   constructor({ backupRoot, defaultProject, validateProject } = {}) {
     if (!backupRoot) throw new Error('backupRoot is required');
@@ -452,10 +484,7 @@ class WorkspaceService {
 
   _current(id) {
     if (!this._session) throw new Error('Select a map folder first');
-    if (id !== undefined && id !== this._session.id) throw new Error('Workspace session has expired');
-    assertNoLinks(this._session.root);
-    if (!fs.existsSync(this._session.root) || !samePath(fs.realpathSync.native(this._session.root), this._session.root)) throw new Error('Workspace folder was moved or replaced');
-    return this._session;
+    return checkedRoot(this._session, id);
   }
 
   current(id) {
@@ -463,14 +492,7 @@ class WorkspaceService {
   }
 
   file(id, relative, { mustExist = false } = {}) {
-    const session = this._current(id);
-    const safe = relativeName(relative);
-    const full = path.join(session.root, ...safe.split('/'));
-    if (!inside(session.root, full)) throw new Error('Path is outside the selected map folder');
-    assertNoLinks(full);
-    if (mustExist && !fs.existsSync(full)) throw new Error(`Workspace file does not exist: ${safe}`);
-    if (fs.existsSync(full) && !inside(session.root, fs.realpathSync.native(full))) throw new Error('Workspace path escapes its root');
-    return full;
+    return workspaceFile(this._current(id), relative, { mustExist });
   }
 
   compare(id) {
@@ -591,4 +613,4 @@ class WorkspaceService {
   }
 }
 
-module.exports = { WorkspaceService };
+module.exports = { WorkspaceService, createBoundWorkspace };

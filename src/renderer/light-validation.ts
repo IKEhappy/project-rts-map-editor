@@ -4,6 +4,7 @@
 // R2：嵌套走全树（数组元素/三档子行/产线行），错误键为 path（如 "hp"、"flags-0"、"tiers-1-hp"）。
 
 import type { Entity, JsonValue } from "./types";
+import { buildingCapacityError } from "./map-limits.ts";
 
 export interface FieldRule {
   kind: "int" | "float" | "enum";
@@ -230,6 +231,88 @@ function isIndex(value: unknown, min: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min;
 }
 
+type ObjectRow = [number, Record<string, unknown>];
+interface BuildingGeometry { index: number; x: number; y: number; w: number; h: number; key: string }
+interface SpawnGeometry { index: number; x: number; y: number }
+
+const buildingGeometryCache = new WeakMap<unknown[], BuildingGeometry[]>();
+const spawnGeometryCache = new WeakMap<unknown[], SpawnGeometry[]>();
+const noBuildingGeometry: BuildingGeometry[] = [];
+const noSpawnGeometry: SpawnGeometry[] = [];
+let lastBuildingGeometry = noBuildingGeometry;
+let lastSpawnGeometry = noSpawnGeometry;
+
+function buildingGeometry(raw: unknown, rows: ObjectRow[]): BuildingGeometry[] {
+  if (!Array.isArray(raw)) return noBuildingGeometry;
+  const previous = buildingGeometryCache.get(raw);
+  if (previous) return lastBuildingGeometry = previous;
+  const projected = rows.map(([index, row]) => ({
+    index, x: Number(row.x), y: Number(row.y), w: Number(row.w ?? 1), h: Number(row.h ?? 1), key: String(row.key ?? "?"),
+  }));
+  // A changed hp/team/production line is a new document row but has the same
+  // collision geometry. Reuse the projection identity in that case as well.
+  const same = projected.length === lastBuildingGeometry.length && projected.every((row, index) => {
+    const old = lastBuildingGeometry[index];
+    return row.index === old.index && row.key === old.key && Object.is(row.x, old.x) && Object.is(row.y, old.y)
+      && Object.is(row.w, old.w) && Object.is(row.h, old.h);
+  });
+  const result = same ? lastBuildingGeometry : projected;
+  buildingGeometryCache.set(raw, result);
+  return lastBuildingGeometry = result;
+}
+
+function spawnGeometry(raw: unknown, rows: ObjectRow[]): SpawnGeometry[] {
+  if (!Array.isArray(raw)) return noSpawnGeometry;
+  const previous = spawnGeometryCache.get(raw);
+  if (previous) return lastSpawnGeometry = previous;
+  const projected = rows.map(([index, row]) => ({ index, x: Number(row.x), y: Number(row.y) }));
+  const same = projected.length === lastSpawnGeometry.length && projected.every((row, index) => {
+    const old = lastSpawnGeometry[index];
+    return row.index === old.index && Object.is(row.x, old.x) && Object.is(row.y, old.y);
+  });
+  const result = same ? lastSpawnGeometry : projected;
+  spawnGeometryCache.set(raw, result);
+  return lastSpawnGeometry = result;
+}
+
+const collisionCache = new WeakMap<BuildingGeometry[], WeakMap<SpawnGeometry[], Map<string, string>>>();
+
+function collisionErrors(buildings: BuildingGeometry[], spawns: SpawnGeometry[]): Map<string, string> {
+  let bySpawns = collisionCache.get(buildings);
+  if (!bySpawns) {
+    bySpawns = new WeakMap();
+    collisionCache.set(buildings, bySpawns);
+  }
+  const previous = bySpawns.get(spawns);
+  if (previous) return previous;
+  const errors = new Map<string, string>();
+  for (let i = 0; i < buildings.length; i += 1) {
+    const a = buildings[i];
+    for (let j = i + 1; j < buildings.length; j += 1) {
+      const b = buildings[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+        errors.set(`buildings-${a.index}-overlap`, `建筑占位重叠：${a.key} 与 ${b.key}（地图内理论不可重合，请挪开）`);
+      }
+    }
+  }
+  for (let i = 0; i < spawns.length; i += 1) {
+    const spawn = spawns[i];
+    for (const b of buildings) {
+      if (spawn.x >= b.x && spawn.y >= b.y && spawn.x < b.x + b.w && spawn.y < b.y + b.h) {
+        errors.set(`spawns-${spawn.index}-overlap`, `出生点（${spawn.x},${spawn.y}）落在建筑 ${b.key} 占位内（不可重合）`);
+        break;
+      }
+    }
+    for (let j = i + 1; j < spawns.length; j += 1) {
+      if (spawns[j].x === spawn.x && spawns[j].y === spawn.y) {
+        errors.set(`spawns-${spawn.index}-dup`, `出生点重复占格：（${spawn.x},${spawn.y}）出现多次（不可重合）`);
+      }
+    }
+  }
+  bySpawns.set(spawns, errors);
+  return errors;
+}
+
 export function validateMapTree(doc: Entity): Map<string, string> {
   const errors = new Map<string, string>();
   if (doc.background !== undefined && doc.background !== null) {
@@ -276,11 +359,11 @@ export function validateMapTree(doc: Entity): Map<string, string> {
   }
 
   // R20：占位冲突警告——建筑/单位/炮台任意两者不得重合（触发召唤物点位不占位、可覆盖）
-  const objectRows = (key: "buildings" | "spawns" | "decor"): Array<[number, Record<string, unknown>]> => {
+  const objectRows = (key: "buildings" | "spawns" | "decor"): ObjectRow[] => {
     const raw = doc[key];
     if (raw === undefined) return [];
     if (!Array.isArray(raw)) { errors.set(key, `${key}：须为对象数组`); return []; }
-    const rows: Array<[number, Record<string, unknown>]> = [];
+    const rows: ObjectRow[] = [];
     raw.forEach((value, index) => {
       if (value === null || typeof value !== "object" || Array.isArray(value)) errors.set(`${key}-${index}`, `${key}：元素须为对象`);
       else rows.push([index, value]);
@@ -288,45 +371,13 @@ export function validateMapTree(doc: Entity): Map<string, string> {
     return rows;
   };
   const blds = objectRows("buildings");
+  if (Array.isArray(doc.buildings)) {
+    const capacityError = buildingCapacityError(doc.buildings.length);
+    if (capacityError) errors.set("buildings", capacityError);
+  }
   objectRows("decor");
-  for (let i = 0; i < blds.length; i += 1) {
-    const [originalIndex, a] = blds[i];
-    const ax = Number(a.x);
-    const ay = Number(a.y);
-    const aw = Number(a.w ?? 1);
-    const ah = Number(a.h ?? 1);
-    for (let j = i + 1; j < blds.length; j += 1) {
-      const [, b] = blds[j];
-      const bx = Number(b.x);
-      const by = Number(b.y);
-      const bw = Number(b.w ?? 1);
-      const bh = Number(b.h ?? 1);
-      if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) {
-        errors.set(`buildings-${originalIndex}-overlap`, `建筑占位重叠：${String(a.key ?? "?")} 与 ${String(b.key ?? "?")}（地图内理论不可重合，请挪开）`);
-      }
-    }
-  }
   const spawnRows = objectRows("spawns");
-  for (let i = 0; i < spawnRows.length; i += 1) {
-    const [originalIndex, spawn] = spawnRows[i];
-    const sx = Number(spawn.x);
-    const sy = Number(spawn.y);
-    for (const [, b] of blds) {
-      const bx = Number(b.x);
-      const by = Number(b.y);
-      const bw = Number(b.w ?? 1);
-      const bh = Number(b.h ?? 1);
-      if (sx >= bx && sy >= by && sx < bx + bw && sy < by + bh) {
-        errors.set(`spawns-${originalIndex}-overlap`, `出生点（${sx},${sy}）落在建筑 ${String(b.key ?? "?")} 占位内（不可重合）`);
-        break;
-      }
-    }
-    for (let j = i + 1; j < spawnRows.length; j += 1) {
-      if (Number(spawnRows[j][1].x) === sx && Number(spawnRows[j][1].y) === sy) {
-        errors.set(`spawns-${originalIndex}-dup`, `出生点重复占格：（${sx},${sy}）出现多次（不可重合）`);
-      }
-    }
-  }
+  for (const [path, message] of collisionErrors(buildingGeometry(doc.buildings, blds), spawnGeometry(doc.spawns, spawnRows))) errors.set(path, message);
 
   const boxes: unknown = doc.box_mode;
   if (boxes !== undefined && !Array.isArray(boxes)) errors.set("box_mode", "box_mode：须为对象数组");

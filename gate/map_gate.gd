@@ -4,7 +4,7 @@ extends SceneTree
 ## 校验权威 = dev-2d（project-rts）真实构建链路：Campaign.build_level（GameMap.from_dict →
 ## MatchConfig.layer → SimCore 装配 → 初始金币/出生/集结/AI）+ SimCore 快照 save/load 往返
 ## （snapshot_validation 全量校验：地形码 0..4、单位键、越界等）+ 空 step 冒烟。
-## 本脚本零独立校验语义：结构可解析性之外，游戏侧拒了（build_level 返回空/往返失败）就是拒了。
+## 语义以游戏为准；游戏装配会静默丢弃的超容量/未知建筑/阻挡出生点在此显式拒绝。
 ##
 ## 用法（Electron 主进程经子进程调用）：
 ##   <godot> --headless --path project-rts --script map-editor/gate/map_gate.gd -- check --candidate <abs path>
@@ -48,6 +48,13 @@ func _run(args: PackedStringArray) -> Dictionary:
 	if not bool(parse.get("ok", false)):
 		return _rejected([String(parse.get("error", "cannot read candidate"))])
 	var data: Dictionary = parse.get("data", {})
+	# SimCore 装配超容量时会截断建筑；必须在 build_level 前拒绝，不能保存一张
+	# 表面构建/快照通过、实则丢失建筑的地图。炮台共用 buildings，spawns 不占此容量。
+	var buildings: Variant = data.get("buildings", [])
+	if buildings is Array:
+		var capacity: int = int(_sim_core_script().MAX_BUILDINGS)
+		if buildings.size() > capacity:
+			return _rejected(["建筑/炮台总数 %d 超出游戏上限 %d（SimCore.MAX_BUILDINGS，单位出生点不计入）" % [buildings.size(), capacity]])
 	var asset_errors: Array = _validate_background(data)
 	if not asset_errors.is_empty():
 		return _rejected(asset_errors)

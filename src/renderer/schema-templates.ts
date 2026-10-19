@@ -143,6 +143,8 @@ export interface FeatureSchema {
   root: Record<string, JsonValue>;
   /** Object defaults keyed by a logical tree path (array indexes omitted). */
   paths: Record<string, Record<string, JsonValue>>;
+  /** Context-sensitive documents (maps) can resolve defaults for an exact row. */
+  resolvePath?(path: Array<string | number>): Record<string, JsonValue>;
 }
 
 function clone<T extends JsonValue>(value: T): T {
@@ -262,6 +264,7 @@ export function featureSchemaForDocument(kind: "units" | "buildings", doc?: Conf
 }
 
 export function defaultsAtPath(schema: FeatureSchema, path: Array<string | number>): Record<string, JsonValue> {
+  if (schema.resolvePath) return schema.resolvePath(path);
   if (path.length === 0) return schema.root;
   const logicalPath = path.filter((part): part is string => typeof part === "string").map((part) => `/${pointerPart(part)}`).join("");
   return schema.paths[logicalPath] ?? {};

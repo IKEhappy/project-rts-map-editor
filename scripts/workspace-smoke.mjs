@@ -431,51 +431,130 @@ export async function runWorkspaceSmoke({ client, fixture, artifacts, prefix = "
   const saved = await checkedApi("readMap", "legacy.json");
   check("valid save passes gate and content hash", saved.data.seed === 24680 && saved.hash === sha(fs.readFileSync(saved.path)), saved);
 
-  // 地图页右键建筑→产线回归：空产线由字段树创建后，嵌套 unit/tier/ticks
-  // 必须保持可编辑并能通过地图保存落盘。这个路径与配置表 buildings 的
-  // lines 测试不同，专门锁住地图条目内的数组写入。
-  await evaluate(client, `(() => {
-    const canvas = document.querySelector('[data-testid="map-canvas"] canvas');
-    if (!canvas) throw new Error('Map canvas missing for building context test');
-    const rect = canvas.getBoundingClientRect();
-    const ppc = parseFloat(canvas.getAttribute('data-ppc'));
-    const ox = parseFloat(canvas.getAttribute('data-ox'));
-    const oy = parseFloat(canvas.getAttribute('data-oy'));
-    const scale = rect.width / (parseFloat(canvas.getAttribute('data-css-w')) || canvas.width);
-    // p0_corridor 的第一座建筑 mine 位于 (7,6)。
-    canvas.dispatchEvent(new MouseEvent('contextmenu', {
-      bubbles: true, cancelable: true,
-      clientX: rect.left + (7 - ox + 0.5) * ppc * scale,
-      clientY: rect.top + (6 - oy + 0.5) * ppc * scale,
-    }));
-    return true;
-  })()`);
-  await waitFor(client, "!!document.querySelector('[data-testid=building-ctx-menu]')", "building context menu for production line");
-  await click(client, "ctx-field-lines");
-  await waitFor(client, `!![...document.querySelectorAll('.field-row')].find((row) => row.querySelector('.field-label code')?.textContent === 'lines' && row.querySelector('button.add'))`, "map building lines field");
-  await evaluate(client, `(() => {
-    const row = [...document.querySelectorAll('.field-row')].find((candidate) => candidate.querySelector('.field-label code')?.textContent === 'lines');
-    const add = row?.querySelector('button.add');
-    if (!add) throw new Error('Map building lines add button missing');
-    add.click();
-  })()`);
-  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-unit]')", "map production line row");
-  // lines[].unit is a custom dropdown in the map field tree (the numeric
-  // fields remain regular inputs). Open it and choose the unit option rather
-  // than invoking HTMLInputElement.value on a button.
-  await click(client, "field-buildings-0-lines-0-unit");
-  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-unit-opt-cougar]')", "map production unit options");
-  await click(client, "field-buildings-0-lines-0-unit-opt-cougar");
-  await setInput(client, "field-buildings-0-lines-0-tier", "2");
-  await setInput(client, "field-buildings-0-lines-0-ticks", "90");
-  check("map production line nested fields remain editable", await evaluate(client, `
-    document.querySelector('[data-testid=field-buildings-0-lines-0-unit]')?.getAttribute('data-value') === 'cougar' &&
-    document.querySelector('[data-testid=field-buildings-0-lines-0-tier]')?.value === '2' &&
-    document.querySelector('[data-testid=field-buildings-0-lines-0-ticks]')?.value === '90'
+  // 地图条目 lines 整组覆盖 def。资源建筑必须从自己的有效定义创建，
+  // 不能用工厂的 unit/tier/ticks 默认值，否则旧 smoke 反而会锁住错误行为。
+  const addMapField = async (field, objectPath = "") => {
+    await click(client, `add-field-btn-${objectPath}`);
+    const selectId = `add-field-select-${objectPath}`;
+    await waitFor(client, `!!document.querySelector(${JSON.stringify(`[data-testid="${selectId}"]`)})`, `map standard fields at ${objectPath}`);
+    await evaluate(client, `(() => {
+      const select = document.querySelector(${JSON.stringify(`[data-testid="${selectId}"]`)});
+      if (![...select.options].some(option => option.value === ${JSON.stringify(field)})) throw new Error("Map standard field unavailable: " + ${JSON.stringify(field)});
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,"value").set.call(select,${JSON.stringify(field)});
+      select.dispatchEvent(new Event("change",{bubbles:true}));
+    })()`);
+    await waitFor(client, `!document.querySelector(${JSON.stringify(`[data-testid="${selectId}"]`)})`, `map field ${field} inserted`);
+  };
+  const openBuildingLines = async (x, y) => {
+    await evaluate(client, `(() => {
+      const canvas = document.querySelector('[data-testid="map-canvas"] canvas');
+      if (!canvas) throw new Error('Map canvas missing for building context test');
+      const rect = canvas.getBoundingClientRect();
+      const ppc = parseFloat(canvas.getAttribute('data-ppc'));
+      const ox = parseFloat(canvas.getAttribute('data-ox'));
+      const oy = parseFloat(canvas.getAttribute('data-oy'));
+      const scale = rect.width / (parseFloat(canvas.getAttribute('data-css-w')) || canvas.width);
+      canvas.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true,
+        clientX: rect.left + (${x} - ox + 0.5) * ppc * scale,
+        clientY: rect.top + (${y} - oy + 0.5) * ppc * scale,
+      }));
+    })()`);
+    await waitFor(client, "!!document.querySelector('[data-testid=building-ctx-menu]')", "building context menu for production line");
+    await click(client, "ctx-field-lines");
+    await waitFor(client, "document.querySelector('[data-testid=map-inspector-tab-object]')?.getAttribute('aria-selected') === 'true' && !!document.querySelector('[data-testid=map-object-inspector] [data-testid=field-lines-0-income], [data-testid=map-object-inspector] [data-testid=field-lines-0-unit]')", "context action selects Object property tree");
+    // Keep the advanced whole-map editor covered by the existing nested
+    // configuration round-trip checks below.
+    if (!await evaluate(client, "!!document.querySelector('[data-testid=map-json-drawer]')")) await click(client, "map-json-toggle");
+  };
+  const saveMapFromUi = async (label) => {
+    await click(client, "map-save-btn");
+    await waitFor(client, "!!document.querySelector('[data-testid=map-save-ok], [data-testid=map-save-errors]')", label, 180000);
+    const error = await evaluate(client, "document.querySelector('[data-testid=map-save-errors]')?.innerText");
+    assert(!error, `${label}: ${error}`);
+    return (await checkedApi("readMap", "legacy.json")).data;
+  };
+  const captureTree = async (name, focusId) => {
+    await evaluate(client, `document.querySelector(${JSON.stringify(`[data-testid="${focusId}"]`)})?.scrollIntoView({block:"center"})`);
+    await sleep(100);
+    const shot = await client.Page.captureScreenshot({ format: "png" });
+    fs.writeFileSync(path.join(artifacts, `${prefix}-${name}.png`), Buffer.from(shot.data, "base64"));
+  };
+
+  // p0_corridor 第一座建筑为 mine，未在地图条目上声明产线。
+  await openBuildingLines(7, 6);
+  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-2-income]')", "mine income lines copied from definition");
+  check("map mine context action copies all income lines without unit fields", await evaluate(client, `
+    [0,1,2].every((index) => document.querySelector('[data-testid=field-buildings-0-lines-'+index+'-income]')?.value === String(index+1)) &&
+    !document.querySelector('[data-testid=field-buildings-0-lines-0-unit]') &&
+    !document.querySelector('[data-testid=field-buildings-0-lines-0-tier]') &&
+    !document.querySelector('[data-testid=field-buildings-0-lines-0-ticks]')
   `));
-  await click(client, "map-save-btn");
-  await waitFor(client, `window.meApi.readMap('legacy.json').then((result) => result.ok && result.data?.buildings?.[0]?.lines?.[0]?.unit === 'cougar' && result.data.buildings[0].lines[0].tier === 2 && result.data.buildings[0].lines[0].ticks === 90)`, "map production line save", 180000);
-  check("map production line nested fields persist after save", true);
+  for (let index = 0; index < 3; index += 1) await setInput(client, `field-buildings-0-lines-${index}-income`, index + 4);
+  await addMapField("hp", "buildings-0");
+  check("map placement standard field uses its building definition default", await evaluate(client, "document.querySelector('[data-testid=field-buildings-0-hp]')?.value === '600'"));
+  await setInput(client, "field-buildings-0-hp", 610);
+  await addMapField("init");
+  check("map root supports standard object fields", await evaluate(client, "!!document.querySelector('[data-testid=add-field-btn-init]')"));
+  const incomeSaved = await saveMapFromUi("mine income map save");
+  check("three resource lines and standard placement fields save through Godot gate", JSON.stringify(incomeSaved.buildings[0].lines) === JSON.stringify([{ income: 4 }, { income: 5 }, { income: 6 }]) && incomeSaved.buildings[0].hp === 610 && typeof incomeSaved.init === "object");
+  await captureTree("map-resource-lines", "field-buildings-0-lines-0-income");
+
+  // 地图局部 def 覆盖使用完整建筑模板，默认产线也必须尊重该覆盖。
+  await addMapField("buildings", "config");
+  await addMapField("mine", "config-buildings");
+  await addMapField("repair_rate", "config-buildings-mine");
+  check("map definition overrides expose typed standard building parameters", await evaluate(client, "document.querySelector('[data-testid=field-config-buildings-mine-repair_rate]')?.value === '6'"));
+  await setInput(client, "field-config-buildings-mine-repair_rate", 8);
+  await addMapField("lines", "config-buildings-mine");
+  await waitFor(client, "!!document.querySelector('[data-testid=field-config-buildings-mine-lines-2-income]')", "mine definition override line defaults");
+  await setInput(client, "field-config-buildings-mine-lines-0-income", 11);
+  for (let index = 2; index >= 0; index -= 1) {
+    await click(client, `array-remove-buildings-0-lines-${index}`);
+    await waitFor(client, `!document.querySelector('[data-testid=field-buildings-0-lines-${index}-income]')`, `remove mine income line ${index}`);
+  }
+  await click(client, "array-add-buildings-0-lines");
+  await waitFor(client, "document.querySelector('[data-testid=field-buildings-0-lines-0-income]')?.value === '11'", "empty mine array uses effective resource default");
+  await click(client, "array-add-buildings-0-lines");
+  await waitFor(client, "document.querySelector('[data-testid=field-buildings-0-lines-1-income]')?.value === '11'", "resource line clone");
+  await setInput(client, "field-buildings-0-lines-1-income", 13);
+  check("empty resource arrays and cloned rows keep income line type", await evaluate(client, "!document.querySelector('[data-testid=field-buildings-0-lines-0-unit]') && !document.querySelector('[data-testid=field-buildings-0-lines-1-tier]') && document.querySelector('[data-testid=field-buildings-0-lines-1-income]')?.value === '13'"));
+
+  // 标准之外的新字段允许连续键入；撤销临时未知字段后再过游戏 schema。
+  await sleep(650); // 单独建立本次新增的撤销记录，不合并前面的有效产线编辑。
+  await click(client, "add-field-btn-buildings-0-lines-0");
+  await waitFor(client, "!!document.querySelector('[data-testid=add-field-input-buildings-0-lines-0]')", "custom map line field input");
+  for (const text of ["smoke", "_", "note"]) await client.Input.insertText({ text });
+  check("map nested custom field name accepts continuous typing", await evaluate(client, "document.querySelector('[data-testid=add-field-input-buildings-0-lines-0]')?.value === 'smoke_note' && document.activeElement?.getAttribute('data-testid') === 'add-field-input-buildings-0-lines-0'"));
+  await click(client, "add-field-ok-buildings-0-lines-0");
+  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-smoke_note]')", "custom map line field created");
+  await evaluate(client, "document.querySelector('[data-testid=field-buildings-0-lines-0-smoke_note]').focus()");
+  for (const text of ["resource", " ", "note"]) await client.Input.insertText({ text });
+  check("map nested custom field value remains focused while typing", await evaluate(client, "document.querySelector('[data-testid=field-buildings-0-lines-0-smoke_note]')?.value === 'resource note' && document.activeElement?.getAttribute('data-testid') === 'field-buildings-0-lines-0-smoke_note'"));
+  for (let attempt = 0; attempt < 4 && await evaluate(client, "!!document.querySelector('[data-testid=field-buildings-0-lines-0-smoke_note]')"); attempt += 1) await click(client, "map-undo-btn");
+  check("map undo removes a custom nested field and preserves earlier resource edits", await evaluate(client, "!document.querySelector('[data-testid=field-buildings-0-lines-0-smoke_note]') && document.querySelector('[data-testid=field-buildings-0-lines-0-income]')?.value === '11' && document.querySelector('[data-testid=field-buildings-0-lines-1-income]')?.value === '13'"));
+  const overrideSaved = await saveMapFromUi("resource override and clone save");
+  check("resource clones and map definition template additions persist after save", JSON.stringify(overrideSaved.buildings[0].lines) === JSON.stringify([{ income: 11 }, { income: 13 }]) && overrideSaved.config.buildings.mine.repair_rate === 8 && overrideSaved.config.buildings.mine.lines[0].income === 11 && !("smoke_note" in overrideSaved.buildings[0].lines[0]));
+  await captureTree("map-template-fields", "field-config-buildings-mine-repair_rate");
+
+  // 用现有第二座建筑的合法位置验证工厂路径，避免给资源建筑写入兵线。
+  await setInput(client, "field-buildings-1-key", "tank_plant_s");
+  await openBuildingLines(0, 0);
+  await waitFor(client, "document.querySelector('[data-testid=field-buildings-1-lines-0-unit]')?.getAttribute('data-value') === 'flamer'", "factory lines copied from factory definition");
+  await addMapField("tier", "buildings-1-lines-0");
+  await addMapField("ticks", "buildings-1-lines-0");
+  await addMapField("upgrade", "buildings-1-lines-0");
+  // unit 用自绘下拉，tier/ticks 用数字输入，均须可编辑并保存。
+  await click(client, "field-buildings-1-lines-0-unit");
+  await waitFor(client, "!!document.querySelector('[data-testid=field-buildings-1-lines-0-unit-opt-cougar]')", "factory production unit options");
+  await click(client, "field-buildings-1-lines-0-unit-opt-cougar");
+  await setInput(client, "field-buildings-1-lines-0-tier", 2);
+  await setInput(client, "field-buildings-1-lines-0-ticks", 90);
+  const factorySaved = await saveMapFromUi("factory production line save");
+  check("factory lines and appended nested standard fields remain editable and persist", factorySaved.buildings[1].key === "tank_plant_s" && factorySaved.buildings[1].lines[0].unit === "cougar" && factorySaved.buildings[1].lines[0].tier === 2 && factorySaved.buildings[1].lines[0].ticks === 90 && factorySaved.buildings[1].lines[0].upgrade === true);
+  await click(client, "map-reload-doc-btn");
+  await waitFor(client, "document.querySelector('[data-testid=field-buildings-0-lines-1-income]')?.value === '13' && document.querySelector('[data-testid=field-buildings-1-lines-0-ticks]')?.value === '90'", "saved resource and factory line UI reload");
+  check("saved resource and factory lines reload into the map field tree", true);
   await click(client, "map-json-toggle");
   const configurations = await editConfigSmoke({ client, fixture, check, artifacts, prefix });
   const tilt = await checkedApi("importImage", { mapId: "whole_smoke", view: "tilt", sourcePath: fixture.tilt });
@@ -497,7 +576,8 @@ export async function runWorkspaceSmoke({ client, fixture, artifacts, prefix = "
   await waitFor(client, "!!document.querySelector('[data-testid=" + '"map-item-whole_smoke-json"' + "]')", "whole-image map list");
   await click(client, "map-item-whole_smoke-json");
   await waitFor(client, "document.querySelector('[data-testid=map-canvas] canvas')?.dataset.background === 'true'", "whole-image preview decoded");
-  await click(client, "map-view-tilt");
+  await click(client, "map-inspector-tab-map");
+    await click(client, "map-view-tilt");
   await waitFor(client, "document.querySelector('[data-testid=map-canvas] canvas')?.dataset.projection === 'tilt'", "tilt projection");
   const layouts = [];
   for (const [width, height] of [[1920, 1080], [1280, 720]]) layouts.push(await captureLayout(client, artifacts, prefix, width, height));

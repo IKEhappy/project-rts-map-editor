@@ -67,6 +67,17 @@ export class DocHistory<T> {
     return (this.redo.get(key)?.length ?? 0) > 0;
   }
 
+  /** A newly created document acquires its disk name without losing edits or undo. */
+  rename(from: string, to: string): void {
+    if (from === to) return;
+    for (const store of [this.undo, this.redo]) {
+      const entries = store.get(from);
+      if (entries) { store.set(to, entries); store.delete(from); }
+    }
+    const last = this.last.get(from);
+    if (last) { this.last.set(to, last); this.last.delete(from); }
+  }
+
   /** 文档重载/切换目录/保存后按需清键（保存不清——保存不是撤销边界，用户仍可撤回改动再改）。 */
   clear(key?: string): void {
     if (key === undefined) {

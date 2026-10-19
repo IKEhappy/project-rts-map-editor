@@ -7,6 +7,7 @@ import { validateEntityTree, validateRuleValue } from "../light-validation";
 import { knownUnitKeys, summonLinesHint, unitSuggestionsFor } from "../suggest";
 import { instantiateTemplate, type TemplateDef } from "../templates";
 import { templatesForDocument, featureSchemaForDocument } from "../schema-templates";
+import { removeAtPath } from "../field-path";
 import type { LabelsData } from "../labels";
 import type { ConfigFile, Entity, JsonValue, Kind, WorkspaceSession } from "../types";
 import EntityList from "./EntityList";
@@ -169,14 +170,14 @@ export default function ConfigsPanel({ workspace, kind, active, labelsData, hand
     setStatus(target, { tone: "idle" });
   }, [setDocs, setStatus]);
 
-  const onEntityChange = useCallback((next: Entity) => {
+  const onEntityChange = useCallback((next: Entity, removeField = false) => {
     const state = docsRef.current[kind];
     if (!state || !selected || busyRef.current) return;
     const index = rowsOf(state.doc, kind).findIndex((row) => String(row.key) === selectedKey);
     if (index < 0) return;
     const nextRows = [...rowsOf(state.doc, kind)];
     nextRows[index] = next;
-    replaceDoc(kind, { ...state.doc, [kind]: nextRows }, "field");
+    replaceDoc(kind, { ...state.doc, [kind]: nextRows }, removeField ? "delete-field" : "field", removeField ? 0 : 600);
     if (String(next.key) !== selectedKey) setSelectedKeys((previous) => ({ ...previous, [kind]: String(next.key) }));
   }, [kind, selected, selectedKey, replaceDoc]);
 
@@ -204,6 +205,11 @@ export default function ConfigsPanel({ workspace, kind, active, labelsData, hand
   const onRuleChange = useCallback((key: string, value: JsonValue) => {
     const state = docsRef.current.rules;
     if (state) replaceDoc("rules", { ...state.doc, [key]: value }, "field");
+  }, [replaceDoc]);
+
+  const onRuleRemove = useCallback((key: string) => {
+    const state = docsRef.current.rules;
+    if (state) replaceDoc("rules", removeAtPath(state.doc, [key]), "delete-field", 0);
   }, [replaceDoc]);
 
   const undoRedo = useCallback((direction: -1 | 1) => {
@@ -303,10 +309,10 @@ export default function ConfigsPanel({ workspace, kind, active, labelsData, hand
         <EntityList rows={rows} selectedKey={selectedKey} onSelect={(key) => setSelectedKeys((previous) => ({ ...previous, [kind]: key }))} templates={templates} onCreateFromTemplate={createFromTemplate} onDelete={deleteEntity} />
         <section className="detail">
           {summonHint ? <div className="banner warn compact">{summonHint}</div> : null}
-          {selected ? <FieldTree entity={selected} original={selectedOriginal} labels={labelsData} lightErrors={lightErrors} unitSuggestions={suggestions} identityEditable={isNewEntity(selectedKey)} featureSchema={featureSchema} onChange={onEntityChange} /> : <div className="empty">（空表——可从左下「＋ 从模板新建」创建实体）</div>}
+          {selected ? <FieldTree entity={selected} original={selectedOriginal} labels={labelsData} lightErrors={lightErrors} unitSuggestions={suggestions} identityEditable={isNewEntity(selectedKey)} featureSchema={featureSchema} onChange={onEntityChange} onRemoveField={(next) => onEntityChange(next, true)} /> : <div className="empty">（空表——可从左下「＋ 从模板新建」创建实体）</div>}
         </section>
       </div> : null}
-      {load && kind === "rules" ? <RulesTable entries={Object.entries(load.doc).filter(([key]) => key !== "version" && key !== "_note")} original={load.original} labels={labelsData} lightErrors={lightErrors} onValueChange={onRuleChange} /> : null}
+      {load && kind === "rules" ? <RulesTable entries={Object.entries(load.doc).filter(([key]) => key !== "version" && key !== "_note")} original={load.original} labels={labelsData} lightErrors={lightErrors} onValueChange={onRuleChange} onRemove={onRuleRemove} /> : null}
       {!load && !errors[kind] ? <div className="empty">加载中…</div> : null}
     </div>
     <div className="configs-status"><span>{selected && kind !== "rules" ? `${selectedKey} · ` : ""}轻校验告警 {lightErrors.size} 处</span><span title={load?.path}>{load?.path}</span></div>

@@ -4,6 +4,7 @@
 // 时再追加一片——保留作者手写结构、不整表重写；目标码 = 默认码即"擦除"（只减不加）。
 
 import type { ConfigFile, Entity, JsonValue } from "./types";
+import { MAX_MAP_BUILDINGS } from "./map-limits.ts";
 
 type Patch = Record<string, JsonValue>;
 
@@ -117,6 +118,9 @@ export interface BuildingDefLike {
 
 /** 建筑放置：占地走统一解析链（配置已给 > 裁定表 > 3×3），出界不放 */
 export function addBuilding(doc: ConfigFile, x: number, y: number, def: BuildingDefLike, team: number): ConfigFile {
+  // The caller presents a capacity error; keep this pure transform incapable
+  // of creating an over-limit map even when called from another entry point.
+  if (Array.isArray(doc.buildings) && doc.buildings.length >= MAX_MAP_BUILDINGS) return doc;
   const width = Number(doc.width ?? 0);
   const height = Number(doc.height ?? 0);
   if (!(width > 0 && height > 0)) return doc;
@@ -199,11 +203,13 @@ function cellInRect(cx: number, cy: number, x: number, y: number, w: number, h: 
 }
 
 /** 删除工具命中链（逆序=后放先删）：建筑 → box 范围 → decor → 出生点；命中即删并返回新 doc */
-export function deleteAt(doc: ConfigFile, cx: number, cy: number): ConfigFile {
+export function deleteAt(doc: ConfigFile, cx: number, cy: number,
+  canDelete: (kind: "building" | "spawn" | "decor" | "box", entity: Entity) => boolean = () => true): ConfigFile {
   const buildings = Array.isArray(doc.buildings) ? (doc.buildings as Patch[]) : null;
   if (buildings) {
     for (let i = buildings.length - 1; i >= 0; i -= 1) {
       const b = buildings[i];
+      if (!canDelete("building", b)) continue;
       if (cellInRect(cx, cy, Number(b.x ?? 0), Number(b.y ?? 0), Number(b.w ?? 1), Number(b.h ?? 1))) {
         return { ...doc, buildings: buildings.filter((_, index) => index !== i) };
       }
@@ -213,6 +219,7 @@ export function deleteAt(doc: ConfigFile, cx: number, cy: number): ConfigFile {
   if (boxes) {
     for (let i = boxes.length - 1; i >= 0; i -= 1) {
       const box = boxes[i];
+      if (!canDelete("box", box)) continue;
       const start = box.start as Patch | undefined;
       const end = box.end as Patch | undefined;
       if (!start || !end) continue;
@@ -224,6 +231,7 @@ export function deleteAt(doc: ConfigFile, cx: number, cy: number): ConfigFile {
   const decor = Array.isArray(doc.decor) ? (doc.decor as Patch[]) : null;
   if (decor) {
     for (let i = decor.length - 1; i >= 0; i -= 1) {
+      if (!canDelete("decor", decor[i])) continue;
       if (Number(decor[i].x) === cx && Number(decor[i].y) === cy) {
         return { ...doc, decor: decor.filter((_, index) => index !== i) };
       }
@@ -232,6 +240,7 @@ export function deleteAt(doc: ConfigFile, cx: number, cy: number): ConfigFile {
   const spawns = Array.isArray(doc.spawns) ? (doc.spawns as Patch[]) : null;
   if (spawns) {
     for (let i = spawns.length - 1; i >= 0; i -= 1) {
+      if (!canDelete("spawn", spawns[i])) continue;
       if (Number(spawns[i].x) === cx && Number(spawns[i].y) === cy) {
         return { ...doc, spawns: spawns.filter((_, index) => index !== i) };
       }

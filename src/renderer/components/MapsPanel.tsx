@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import { api, serializeText } from "../api";
-import { canonicalJson } from "../canonical";
+import { equalFieldValue } from "../field-value-equality";
 import { DocHistory } from "../history";
+import { LatestSaveQueue } from "../latest-save-queue";
 import {
   DEFAULT_TOOL_STATE,
   addBox,
@@ -23,6 +24,10 @@ import {
   type ToolState,
 } from "../map-edit-ops";
 import { validateMapTree } from "../light-validation";
+import { buildingCapacityError } from "../map-limits";
+import { defaultsAtPath } from "../schema-templates";
+import { featureSchemaForMap } from "../map-feature-schema";
+import { remapMapSelections } from "../map-selection";
 import type { BackgroundInfo, ConfigFile, Entity, MapsListResult, MapSaveResult, WorkspaceSession } from "../types";
 import { backgroundForView, withBackgroundSlot, withoutBackground, type BackgroundSlot, type BackgroundView } from "../background-model";
 import { Braces, Eraser, FilePlus2, Flower2, FolderInput, Landmark, MapPin, MousePointer2, Move, Paintbrush, Redo2, RotateCcw, Save, ScanLine, Shapes, SquareDashed, Trash2, Trees, Undo2 } from "lucide-react";
@@ -30,6 +35,9 @@ import type { LabelsData } from "../labels";
 import Dropdown from "./Dropdown";
 import FieldTree from "./FieldTree";
 import MapCanvas from "./MapCanvas";
+import MapVisibilityPanel from "./MapVisibilityPanel";
+import MapObjectInspector from "./MapObjectInspector";
+import { DEFAULT_MAP_VISIBILITY, mapObjectVisible, type MapVisibility } from "../map-visibility";
 import BackgroundInspector from "./BackgroundInspector";
 
 /** Unit choices used by a map's buildings.lines editor.  The map document is
@@ -87,6 +95,8 @@ export interface MapsPanelHandle {
   saveAll(): Promise<boolean>;
   isAnyDirty(): boolean;
   isBusy(): boolean;
+  isSaving(): boolean;
+  isEditingBlocked(): boolean;
   /** 撤销/重做当前激活地图（App 全局快捷键路由） */
   undo(): void;
   redo(): void;
@@ -102,10 +112,11 @@ interface Props {
   handleRef?: Ref<MapsPanelHandle>;
   onDirtyChange?(dirtyCount: number): void;
   onBusyChange?(busy: boolean): void;
+  onSavingChange?(saving: boolean): void;
   unitsCache?: Entity[] | null;
   /** 地图页当前激活（参数热键只在激活时接管数字键/字母 B） */
   active?: boolean;
-  /** buildings.json 在工具内保存的版本号（R14：占地/血量默认实时更新） */
+  /** 配置表保存版本号（占地/血量默认与地图字段模板实时更新） */
   buildingsVersion?: number;
 }
 
@@ -120,7 +131,7 @@ function dirtyOf(state?: MapDocState | null): boolean {
   if (!state) return false;
   if (state.isNew) return true;
   try {
-    return canonicalJson(state.doc) !== canonicalJson(state.original);
+    return !equalFieldValue(state.doc, state.original);
   } catch {
     return true;
   }
@@ -195,22 +206,43 @@ const TOOL_HINTS: Record<ToolState["tool"], string> = {
 };
 const TOOL_ICONS = { none: MousePointer2, terrain: Paintbrush, erase: Eraser, box: SquareDashed, building: Landmark, tree: Trees, spawn: MapPin, delete: Trash2, "move-unit": Move, "move-shape": Shapes, "move-render": Flower2 };
 
-export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyChange, onBusyChange, unitsCache = null, active = false, buildingsVersion = 0 }: Props) {
+export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyChange, onBusyChange, onSavingChange, unitsCache = null, active = false, buildingsVersion = 0 }: Props) {
   const [list, setList] = useState<MapsListResult | null>(null);
-  const [docs, setDocs] = useState<Record<string, MapDocState>>({}); // key: 文件名或 "@new/<name>"
+  const [docs, setDocsState] = useState<Record<string, MapDocState>>({}); // key: 文件名或 "@new/<name>"
+  const docsRef = useRef(docs);
+  const setDocs = useCallback((update: (previous: Record<string, MapDocState>) => Record<string, MapDocState>) => {
+    const next = update(docsRef.current);
+    docsRef.current = next;
+    setDocsState(next);
+  }, []);
   const [activeKey, setActiveKey] = useState<string>("");
   const [saveState, setSaveState] = useState<SaveState>({ tone: "idle" });
+  const saveFailures = useRef(new Map<string, SaveState>());
   const [busy, setBusyState] = useState(false);
   const busyRef = useRef(false);
   const setBusy = useCallback((next: boolean) => { busyRef.current = next; setBusyState(next); }, []);
-  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  const [saving, setSaving] = useState(false);
+  const aliases = useRef(new Map<string, string>());
+  const saveIdentities = useRef(new Map<string, string>());
+  const resolveKey = useCallback((key: string): string => {
+    while (aliases.current.has(key)) key = aliases.current.get(key)!;
+    return key;
+  }, []);
+  const writeRef = useRef<(key: string, snapshot: ConfigFile) => Promise<boolean>>(async () => false);
+  const queueRef = useRef<LatestSaveQueue<ConfigFile> | null>(null);
+  if (!queueRef.current) queueRef.current = new LatestSaveQueue((key, snapshot) => writeRef.current(key, snapshot), setSaving);
+  const isSaving = useCallback(() => queueRef.current!.isBusy(), []);
+  useEffect(() => { onBusyChange?.(busy); onSavingChange?.(saving); }, [busy, saving, onBusyChange, onSavingChange]);
   useEffect(() => () => { onBusyChange?.(false); }, [onBusyChange]);
+  useEffect(() => () => { onSavingChange?.(false); }, [onSavingChange]);
   const newCounter = useRef(0);
   const historyRef = useRef(new DocHistory<ConfigFile>());
   const [historyTick, setHistoryTick] = useState(0); // 撤销/重做后驱动按钮可用态刷新
   // R8 画布直编：工具态 + 建筑配置表（占地/血量默认来源；随工具内保存的 buildings.json 实时刷新）
   const [toolState, setToolState] = useState<ToolState>(DEFAULT_TOOL_STATE);
+  const [visibility, setVisibility] = useState<MapVisibility>(DEFAULT_MAP_VISIBILITY);
   const [buildingDefs, setBuildingDefs] = useState<BuildingDefLike[]>([]);
+  const [schemaSources, setSchemaSources] = useState<Parameters<typeof featureSchemaForMap>[1]>({});
   const buildingAbbreviations = useMemo(() => buildingAbbreviationsOf(buildingDefs), [buildingDefs]);
   // R12：JSON 字段树默认折叠（研发入口），悬浮按钮开合底层抽屉
   const [jsonOpen, setJsonOpen] = useState(false);
@@ -224,6 +256,8 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   // R22：选中对象（预览点按已放置对象→选中并切对应模式；拖动移动）
   const [selectedObject, setSelectedObject] = useState<{ kind: "building" | "spawn"; index: number } | null>(null);
   const [selectedObjects, setSelectedObjects] = useState<Array<{ kind: "building" | "spawn"; index: number }>>([]);
+  const [inspectorTab, setInspectorTab] = useState<"map" | "object">("map");
+  const [objectFocus, setObjectFocus] = useState<{ path: Array<string | number>; id: number }>({ path: [], id: 0 });
   const [backgroundInfo, setBackgroundInfo] = useState<BackgroundInfo | null>(null);
   const [backgroundView, setBackgroundView] = useState<BackgroundView>("topdown");
   const [imageModeRequested, setImageModeRequested] = useState(false);
@@ -232,22 +266,27 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .readWorkspaceConfig("buildings")
-      .then((result) => {
-        if (!cancelled && result.ok && result.data) {
-          // 占地三级解析：配置已给（实时）→ 用户裁定表 → sim 3×3 回退
-          const defs = buildingDefsOf(result.data).map((def) => {
-            const fp = footprintFor(def.key, def.w, def.h);
-            return { ...def, w: fp.w, h: fp.h };
-          });
-          setBuildingDefs(defs);
-          setToolState((prev) => (prev.buildingKey === "" && defs.length > 0 ? { ...prev, buildingKey: defs[0].key } : prev));
-        }
-      })
-      .catch(() => {
-        /* 建筑下拉降级为空（放置工具不可用，字段树不受影响） */
-      });
+    void Promise.allSettled([
+      api.readWorkspaceConfig("buildings"),
+      api.readWorkspaceConfig("units"),
+      api.readWorkspaceConfig("rules"),
+      api?.editorTemplates?.(),
+    ]).then(([buildings, units, rules, templates]) => {
+      if (cancelled) return;
+      const dataOf = (result: PromiseSettledResult<{ ok: boolean; data?: ConfigFile } | undefined>) =>
+        result.status === "fulfilled" && result.value?.ok ? result.value.data : undefined;
+      setSchemaSources({ buildings: dataOf(buildings), units: dataOf(units), rules: dataOf(rules), toolTemplates: dataOf(templates) });
+      const result = buildings.status === "fulfilled" ? buildings.value : undefined;
+      if (result?.ok && result.data) {
+        // 占地三级解析：配置已给（实时）→ 用户裁定表 → sim 3×3 回退
+        const defs = buildingDefsOf(result.data).map((def) => {
+          const fp = footprintFor(def.key, def.w, def.h);
+          return { ...def, w: fp.w, h: fp.h };
+        });
+        setBuildingDefs(defs);
+        setToolState((prev) => (prev.buildingKey === "" && defs.length > 0 ? { ...prev, buildingKey: defs[0].key } : prev));
+      } else setBuildingDefs([]);
+    });
     return () => {
       cancelled = true;
     };
@@ -264,6 +303,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   }, [buildingDefs, toolState.buildingKey]);
 
   const load = activeKey ? docs[activeKey] ?? null : null;
+  const featureSchema = useMemo(() => featureSchemaForMap(load?.doc ?? {}, schemaSources), [load?.doc, schemaSources]);
   const dirty = dirtyOf(load);
   const dirtyCount = useMemo(() => Object.values(docs).filter(dirtyOf).length, [docs]);
   const backgroundKey = JSON.stringify([load?.doc.background, load?.doc.renderer]);
@@ -281,9 +321,15 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     });
     return () => { cancelled = true; };
   }, [activeKey, backgroundKey, backgroundRevision, workspace.id, workspace.generation]);
+  const previousActiveKey = useRef(activeKey);
   useEffect(() => {
+    const previous = previousActiveKey.current;
+    previousActiveKey.current = activeKey;
+    if (previous && previous !== activeKey && resolveKey(previous) === activeKey) return;
     setSelectedObject(null);
     setSelectedObjects([]);
+    setInspectorTab("map");
+    setObjectFocus({ path: [], id: 0 });
     setCtxMenu(null);
     setImageModeRequested(false);
     setBackgroundView("topdown");
@@ -292,6 +338,9 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const hasOwnBackground = ownBackground != null && (typeof ownBackground !== "object" || Array.isArray(ownBackground) || Object.keys(ownBackground).length > 0);
   const wholeImageMode = imageModeRequested || hasOwnBackground || (backgroundInfo != null && backgroundInfo.source !== "none");
   const previewImage = backgroundForView(backgroundInfo, backgroundView);
+  const hoverSources = useMemo(() => ({ buildings: schemaSources?.buildings, units: schemaSources?.units,
+    renderConfig: backgroundInfo?.renderConfig, backgroundPath: previewImage?.path }),
+  [schemaSources?.buildings, schemaSources?.units, backgroundInfo?.renderConfig, previewImage?.path]);
   useEffect(() => {
     if (wholeImageMode) setToolState((prev) => prev.tool === "terrain" || prev.tool === "erase" ? { ...prev, tool: "box" } : prev);
   }, [wholeImageMode]);
@@ -311,7 +360,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   }, [refreshList]);
 
   const refreshWorkspace = useCallback(async () => {
-    if (busy) return;
+    if (busyRef.current || isSaving()) return;
     try {
       setBackgroundRevision((value) => value + 1);
       await refreshList();
@@ -324,7 +373,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
       }));
       setExternalChanges(changed.filter((name): name is string => name !== null));
     } catch (error) { setSaveState({ tone: "rejected", code: "read", errors: [String(error)] }); }
-  }, [busy, docs, refreshList]);
+  }, [busy, docs, refreshList, isSaving]);
 
   useEffect(() => {
     const onFocus = () => { void refreshWorkspace(); };
@@ -390,27 +439,40 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     setSaveState({ tone: "idle" });
   }, [list, docs]);
 
+  const remapSelection = useCallback((next: ConfigFile) => {
+    if (!load) return;
+    const mapped = remapMapSelections(load.doc, next, selectedObjects);
+    if (mapped.length !== selectedObjects.length || mapped.some((row, index) => row !== selectedObjects[index])) setSelectedObjects(mapped);
+    const activeSelection = selectedObject ? remapMapSelections(load.doc, next, [selectedObject])[0] : null;
+    const nextActive = activeSelection ?? mapped.at(-1) ?? null;
+    if (nextActive?.kind !== selectedObject?.kind || nextActive?.index !== selectedObject?.index) setSelectedObject(nextActive);
+  }, [load, selectedObject, selectedObjects]);
+
   const updateDoc = useCallback(
     (next: Entity) => {
-      if (!load || busyRef.current) return;
-      historyRef.current.commit(activeKey, load.doc, "field");
-      setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc: next as ConfigFile } }));
+      const current = docsRef.current[activeKey];
+      if (!current || busyRef.current) return;
+      historyRef.current.commit(activeKey, current.doc, "field");
+      remapSelection(next);
+      setDocs((prev) => ({ ...prev, [activeKey]: { ...prev[activeKey], doc: next as ConfigFile } }));
     },
-    [load, activeKey, busy],
+    [load, activeKey, busy, remapSelection],
   );
 
   // —— R8 画布直编：语义回调 → map-edit-ops 纯函数变换 doc（字段树同帧可见） ——
   const applyDoc = useCallback(
     (next: ConfigFile, tag: string) => {
-      if (!load) return;
-      historyRef.current.commit(activeKey, load.doc, tag, 0); // 画布操作离散：不合并不窗
-      setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc: next } }));
+      const current = docsRef.current[activeKey];
+      if (!current || next === current.doc) return;
+      historyRef.current.commit(activeKey, current.doc, tag, 0); // 画布操作离散：不合并不窗
+      remapSelection(next);
+      setDocs((prev) => ({ ...prev, [activeKey]: { ...prev[activeKey], doc: next } }));
     },
-    [load, activeKey],
+    [load, activeKey, remapSelection],
   );
 
   const importBackground = useCallback(async (slot: BackgroundSlot) => {
-    if (!load || busyRef.current) return;
+    if (!load || busyRef.current || isSaving()) return;
     const key = activeKey;
     setBusy(true);
     try {
@@ -432,7 +494,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   }, [load, activeKey, busy, backgroundInfo]);
 
   const importMap = useCallback(async () => {
-    if (busyRef.current) return;
+    if (busyRef.current || isSaving()) return;
     setBusy(true);
     try {
       const result = await api.importMap();
@@ -476,16 +538,17 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
       if (!load || busyRef.current) return;
       const next = dir < 0 ? historyRef.current.undoFor(activeKey, load.doc) : historyRef.current.redoFor(activeKey, load.doc);
       if (next === null) return;
-      setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc: next } }));
+      remapSelection(next);
+      setDocs((prev) => ({ ...prev, [activeKey]: { ...prev[activeKey], doc: next } }));
       setHistoryTick((tick) => tick + 1);
     },
-    [load, activeKey, busy],
+    [load, activeKey, busy, remapSelection],
   );
   void historyTick; // 仅驱动重渲染（canUndo/canRedo 即时读历史栈）
 
   /** 丢弃未保存编辑重读当前地图（脏则确认） */
   const reloadActive = useCallback(async () => {
-    if (!load || busyRef.current) return;
+    if (!load || busyRef.current || isSaving()) return;
     if (dirtyOf(load) && !window.confirm("当前地图有未保存修改，重新加载将丢弃，确认？")) return;
     if (!load.isNew) {
       setBusy(true);
@@ -532,6 +595,10 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     (sel: { kind: "building" | "spawn"; index: number } | null) => {
       setSelectedObject(sel);
       setSelectedObjects(sel ? [sel] : []);
+      if (sel) {
+        setInspectorTab("object");
+        setObjectFocus({ path: [], id: 0 });
+      }
     },
     [],
   );
@@ -539,6 +606,10 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const onSelectObjects = useCallback((sels: Array<{ kind: "building" | "spawn"; index: number }>) => {
     setSelectedObjects(sels);
     setSelectedObject(sels.at(-1) ?? null);
+    if (sels.length) {
+      setInspectorTab("object");
+      setObjectFocus({ path: [], id: 0 });
+    }
   }, []);
 
   /** R29：画布主键盘 1~9 给悬停建筑/炮台/单位切换队伍；仍保留右键 JSON 调参路径。 */
@@ -733,14 +804,17 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   useEffect(() => {
     const valid = selectedObjects.filter((sel) => {
       const list = sel.kind === "building" ? load?.doc.buildings : load?.doc.spawns;
-      return Array.isArray(list) && sel.index >= 0 && sel.index < list.length;
+      const row = Array.isArray(list) ? list[sel.index] : null;
+      return !!row && typeof row === "object" && !Array.isArray(row)
+        && mapObjectVisible(visibility, sel.kind, row as Entity);
     });
     if (valid.length !== selectedObjects.length) setSelectedObjects(valid);
     const activeIsValid = selectedObject
       && valid.some((sel) => sel.kind === selectedObject.kind && sel.index === selectedObject.index);
     const nextActive = activeIsValid ? selectedObject : (valid.at(-1) ?? null);
     if (nextActive?.kind !== selectedObject?.kind || nextActive?.index !== selectedObject?.index) setSelectedObject(nextActive);
-  }, [load, selectedObject, selectedObjects]);
+  }, [load, selectedObject, selectedObjects, visibility]);
+  useEffect(() => { setCtxMenu(null); }, [visibility]);
 
   /** R20：占位冲突检测——建筑/单位/炮台任意两者不得重合（开局触发召唤物点位=允许覆盖，
    *  不在任何占位表中，天然可放）。返回 null=可放，否则返回冲突描述。 */
@@ -791,6 +865,11 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     (x: number, y: number) => {
       if (!load) return;
       if (toolState.tool === "building") {
+        const capacityError = buildingCapacityError((Array.isArray(load.doc.buildings) ? load.doc.buildings.length : 0) + 1);
+        if (capacityError) {
+          setSaveState({ tone: "rejected", code: "usage", errors: [capacityError] });
+          return;
+        }
         const def = buildingDefs.find((d) => d.key === toolState.buildingKey);
         if (!def) return;
         const fp = footprintFor(def.key, def.w, def.h);
@@ -817,9 +896,10 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   const onDeleteAt = useCallback(
     (x: number, y: number) => {
       if (!load) return;
-      applyDoc(deleteAt(load.doc, x, y), "canvas-delete");
+      applyDoc(deleteAt(load.doc, x, y, (kind, row) => kind === "decor"
+        ? !visibility.hideRender : kind === "box" ? !visibility.hideBoxes : mapObjectVisible(visibility, kind, row)), "canvas-delete");
     },
-    [load, applyDoc],
+    [load, applyDoc, visibility],
   );
 
   /** R16：右键取消当前工具回预览（编辑器惯例；预览态右键建筑仍出调参菜单） */
@@ -844,9 +924,10 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   /** R17：执行文件重命名（含 .bak 跟随；已打开副本换键保留编辑态） */
   const doRename = useCallback(
     async (from: string, to: string) => {
-      if (busyRef.current) return;
+      if (busyRef.current || isSaving()) return;
       setBusy(true);
       try {
+        if (to !== from && docsRef.current[to]) throw new Error(`目标地图 ${to} 已在编辑器中打开，请先处理该工作副本，不能覆盖`);
         let baseHash = docs[from]?.hash;
         if (!baseHash) {
           const read = await api.readMap(from);
@@ -856,6 +937,12 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
         const result = await api.renameMap({ from, to, baseHash });
         if (!result.ok) throw new Error((result.errors ?? ["重命名失败"])[0]);
         const newName = result.name ?? to;
+        // Renaming is disabled until the save queue drains. The next save can
+        // therefore start a fresh identity at the new disk name.
+        saveIdentities.current.delete(from);
+        saveIdentities.current.delete(newName);
+        aliases.current.delete(newName);
+        for (const [source, target] of aliases.current) if (target === from) aliases.current.delete(source);
         setRenameModal(null);
         setDocs((prev) => {
           const next = { ...prev };
@@ -868,7 +955,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
         });
         setActiveKey((key) => (key === from ? newName : key));
         setExternalChanges((prev) => prev.filter((name) => name !== from));
-        historyRef.current.clear(from);
+        historyRef.current.rename(from, newName);
         await refreshList();
       } catch (error) {
         setRenameModal((prev) => (prev ? { ...prev, error: String(error) } : prev));
@@ -879,147 +966,121 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     [docs, refreshList, setBusy],
   );
 
-  // —— R14/R20 右键调参（建筑 + 出生点）：菜单 → 确保字段存在 → 展开 JSON 抽屉 → 定位 ——
+  // Right-click selects the same original placement index as the canvas.
   const onEntityContext = useCallback(
     (hit: { kind: "building" | "spawn"; index: number; cell: { x: number; y: number } }, screen: { x: number; y: number }) => {
       if (!load) return;
-      if (hit.kind === "building") {
-        if (!Array.isArray(load.doc.buildings)) return;
-        const list = load.doc.buildings as Array<Entity>;
-        const b = list[hit.index];
-        if (!b) return;
-        setCtxMenu({ kind: "building", index: hit.index, x: screen.x, y: screen.y });
-      } else {
-        if (!Array.isArray(load.doc.spawns)) return;
-        if (!(load.doc.spawns as Array<Entity>)[hit.index]) return;
-        setCtxMenu({ kind: "spawn", index: hit.index, x: screen.x, y: screen.y });
-      }
-    },
-    [load],
+      const rows = load.doc[hit.kind === "building" ? "buildings" : "spawns"];
+      const row = Array.isArray(rows) ? rows[hit.index] : null;
+      if (!row || typeof row !== "object" || Array.isArray(row)) return;
+      onSelectObject({ kind: hit.kind, index: hit.index });
+      setCtxMenu({ kind: hit.kind, index: hit.index, x: screen.x, y: screen.y });
+    }, [load, onSelectObject],
   );
 
-  /** 通用字段跳转（R20）：basePath 为数组字段名，field 缺省时按 default 创建后定位 */
+  /** Select one placement, create a missing override from its standard, then
+   * ask the mounted Tree to expand and focus it after React commits. */
   const focusArrayField = useCallback(
     (basePath: "buildings" | "spawns", index: number, field: string | null) => {
-      if (!load) return;
+      if (!load || busyRef.current) return;
+      const rows = load.doc[basePath];
+      const raw = Array.isArray(rows) ? rows[index] : null;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+      const selection = { kind: basePath === "buildings" ? "building" as const : "spawn" as const, index };
+      setSelectedObject(selection);
+      setSelectedObjects([selection]);
+      setInspectorTab("object");
       setCtxMenu(null);
-      setJsonOpen(true);
-      let doc = load.doc;
-      if (field !== null) {
-        const list = Array.isArray(doc[basePath]) ? [...((doc as Record<string, unknown>)[basePath] as Array<Entity>)] : [];
-        const entry: Entity = { ...(list[index] as Entity) };
-        if (entry && !(field in entry)) {
-          if (basePath === "buildings") {
-            const def = buildingDefs.find((d) => d.key === String(entry.key ?? ""));
-            if (field === "level") entry.level = 1;
-            else if (field === "hp") entry.hp = def?.hp ?? 500;
-            else if (field === "team") entry.team = entry.team ?? 1;
-            else if (field === "lines") entry.lines = [];
-            else if (field === "unlocked_lines") entry.unlocked_lines = 1;
-          } else {
-            if (field === "count") entry.count = 1;
-            else if (field === "team") entry.team = entry.team ?? 1;
-            else if (field === "kind") entry.kind = entry.kind ?? 0;
-          }
-          list[index] = entry;
-          doc = { ...doc, [basePath]: list };
-          historyRef.current.commit(activeKey, load.doc, "ctx-add-field", 0);
-          setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc } }));
-        }
+      if (field !== null && !Object.hasOwn(raw, field)) {
+        const defaults = defaultsAtPath(featureSchema, [basePath, index]);
+        if (!Object.hasOwn(defaults, field)) return;
+        const next = [...rows as Entity[]];
+        next[index] = { ...raw, [field]: JSON.parse(JSON.stringify(defaults[field])) };
+        applyDoc({ ...load.doc, [basePath]: next }, "ctx-add-field");
       }
-      const testId = field === null ? `field-${basePath}-${index}-${basePath === "buildings" ? "key" : "kind"}` : `field-${basePath}-${index}-${field}`;
-      window.setTimeout(() => {
-        const el = document.querySelector(`[data-testid="${testId}"]`);
-        if (el) {
-          el.scrollIntoView({ block: "center", behavior: "smooth" });
-          el.classList.add("flash-focus");
-          window.setTimeout(() => el.classList.remove("flash-focus"), 1800);
-        }
-      }, 80);
-    },
-    [load, buildingDefs, activeKey],
+      setObjectFocus((previous) => ({
+        path: [field ?? (basePath === "buildings" ? "key" : "kind")], id: previous.id + 1,
+      }));
+    }, [load, featureSchema, applyDoc],
   );
 
-  /** 菜单项 → 打开抽屉并跳到 buildings-<i>[-field]；字段缺失则先按默认值创建（进撤销历史） */
-  const focusBuildingField = useCallback(
-    (index: number, field: "team" | "level" | "hp" | null) => {
-      if (!load) return;
-      setCtxMenu(null);
-      setJsonOpen(true);
-      let doc = load.doc;
-      if (field !== null) {
-        const list = Array.isArray(doc.buildings) ? [...(doc.buildings as Array<Entity>)] : [];
-        const entry: Entity = { ...(list[index] as Entity) };
-        if (entry !== null && !(field in entry)) {
-          const def = buildingDefs.find((d) => d.key === String(entry.key ?? ""));
-          if (field === "level") entry.level = 1;
-          else if (field === "hp") entry.hp = def?.hp ?? 500;
-          // team 恒存在，仅防御
-          else entry.team = entry.team ?? 1;
-          list[index] = entry;
-          doc = { ...doc, buildings: list };
-          historyRef.current.commit(activeKey, load.doc, "ctx-add-field", 0);
-          setDocs((prev) => ({ ...prev, [activeKey]: { ...load, doc } }));
-        }
+  writeRef.current = async (requestedKey: string, snapshot: ConfigFile): Promise<boolean> => {
+      const key = resolveKey(requestedKey);
+      const state = docsRef.current[key];
+      if (!state) return false;
+      if (!state.isNew && equalFieldValue(snapshot, state.original)) {
+        setSaveState({ tone: "ok", written: false, label: state.name });
+        saveFailures.current.delete(key);
+        return true;
       }
-      const testId = field === null ? `field-buildings-${index}-key` : `field-buildings-${index}-${field}`;
-      window.setTimeout(() => {
-        const el = document.querySelector(`[data-testid="${testId}"]`);
-        if (el) {
-          el.scrollIntoView({ block: "center", behavior: "smooth" });
-          el.classList.add("flash-focus");
-          window.setTimeout(() => el.classList.remove("flash-focus"), 1800);
-        }
-      }, 80);
-    },
-    [load, buildingDefs, activeKey],
-  );
-
-  const saveDoc = useCallback(
-    async (key: string): Promise<boolean> => {
-      if (busyRef.current) return false;
-      const state = docs[key];
-      if (!state || !dirtyOf(state)) return true;
       setSaveState({ tone: "saving" });
-      setBusy(true);
       try {
-        const targetName = state.isNew ? fileNameFor(state.doc.name, `new_map_${Date.now()}`) : state.name;
+        const targetName = state.isNew ? fileNameFor(snapshot.name, `new_map_${Date.now()}`) : state.name;
+        if (targetName !== key && docsRef.current[targetName]) {
+          const failure: SaveState = { tone: "rejected", code: "conflict", errors: [`${targetName} 已在编辑器中打开，请更换新地图名称，不能覆盖已有工作副本`] };
+          saveFailures.current.set(key, failure);
+          setSaveState(failure);
+          return false;
+        }
         const result: MapSaveResult = await api.saveMap({
           name: targetName,
-          data: state.doc,
+          data: snapshot,
           baseHash: state.hash,
           expectCreate: state.isNew,
         });
         if (result.ok) {
-          const text = serializeText(state.doc);
+          const text = serializeText(snapshot);
           const hash = result.hash ?? state.hash;
+          if (key !== targetName) {
+            aliases.current.set(key, targetName);
+            saveIdentities.current.set(targetName, saveIdentities.current.get(key) ?? requestedKey);
+            historyRef.current.rename(key, targetName);
+          }
           setDocs((prev) => {
             const next = { ...prev };
             delete next[key];
-            next[targetName] = { name: targetName, doc: state.doc, text, hash, path: result.path ?? state.path, isNew: false, original: state.doc };
+            // The disk baseline advances to the submitted snapshot; edits made
+            // during validation remain in the current document and stay dirty.
+            next[targetName] = { ...prev[key], name: targetName, text, hash, path: result.path ?? state.path, isNew: false, original: snapshot };
             return next;
           });
-          setActiveKey(targetName);
+          setActiveKey((current) => current === key ? targetName : current);
           setExternalChanges((prev) => prev.filter((name) => name !== targetName));
+          saveFailures.current.delete(key);
+          saveFailures.current.delete(targetName);
           setSaveState({
             tone: "ok",
             written: Boolean(result.written),
-            label: state.isNew ? `已创建：${targetName}` : targetName,
+            label: targetName,
           });
-          await refreshList();
+          // A list refresh is ancillary: a read failure must not discard the
+          // next requested snapshot after this atomic write already succeeded.
+          try { await refreshList(); } catch { /* Refresh can be retried explicitly. */ }
           return true;
         }
-        setSaveState({ tone: "rejected", code: result.code ?? "error", errors: result.errors ?? ["未知错误"] });
+        const failure: SaveState = { tone: "rejected", code: result.code ?? "error", errors: (result.errors ?? ["未知错误"]).map((error) => `${targetName}：${error}`) };
+        saveFailures.current.set(key, failure);
+        setSaveState(failure);
         return false;
       } catch (error) {
-        setSaveState({ tone: "rejected", code: "io", errors: [String(error)] });
+        const failure: SaveState = { tone: "rejected", code: "io", errors: [`${state.name || key}：${String(error)}`] };
+        saveFailures.current.set(key, failure);
+        setSaveState(failure);
         return false;
-      } finally {
-        setBusy(false);
       }
-    },
-    [docs, refreshList],
-  );
+  };
+
+  const saveDoc = useCallback((requestedKey: string): Promise<boolean> => {
+    if (busyRef.current) return Promise.resolve(false);
+    const key = resolveKey(requestedKey);
+    const state = docsRef.current[key];
+    if (!state) return Promise.resolve(true);
+    if (!dirtyOf(state) && !isSaving()) {
+      setSaveState({ tone: "ok", written: false, label: state.name });
+      return Promise.resolve(true);
+    }
+    return queueRef.current!.request(saveIdentities.current.get(key) ?? key, state.doc);
+  }, [resolveKey, isSaving]);
 
   const save = useCallback(() => {
     if (!load || busyRef.current) return;
@@ -1031,18 +1092,24 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
     () => ({
       async saveAll(): Promise<boolean> {
         if (busyRef.current) return false;
-        for (const key of Object.keys(docs)) {
-          if (dirtyOf(docs[key])) {
-            const ok = await saveDoc(key);
-            if (!ok) return false;
-          }
+        const keys = Object.keys(docsRef.current)
+          .filter((key) => dirtyOf(docsRef.current[key]) || isSaving());
+        const results = await Promise.all(keys.map((key) => saveDoc(key)));
+        const failed = keys.find((_, index) => !results[index]);
+        if (failed) {
+          const key = resolveKey(failed);
+          setActiveKey(key);
+          const failure = saveFailures.current.get(key) ?? saveFailures.current.get(failed);
+          if (failure) setSaveState(failure);
         }
-        return true;
+        return results.every(Boolean) && !Object.values(docsRef.current).some(dirtyOf);
       },
       isAnyDirty(): boolean {
-        return Object.values(docs).some(dirtyOf);
+        return Object.values(docsRef.current).some(dirtyOf);
       },
-      isBusy(): boolean { return busyRef.current; },
+      isBusy(): boolean { return busyRef.current || isSaving(); },
+      isSaving,
+      isEditingBlocked: () => busyRef.current,
       undo(): void {
         undoRedo(-1);
       },
@@ -1052,10 +1119,6 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
       save(): void {
         // R18：无改动也给反馈（此前静默无反应，观感即"Ctrl+S 没用"）
         if (!load) return;
-        if (!dirtyOf(load)) {
-          setSaveState({ tone: "ok", written: false, label: load.isNew ? "（新地图，未落盘）" : load.name });
-          return;
-        }
         save();
       },
       async reloadCurrent(): Promise<void> {
@@ -1111,7 +1174,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   // Ctrl+S/Ctrl+Z/Ctrl+Y 由 App 全局监听统一路由到本面板句柄（隐藏时不响应——
   // 面板常驻挂载，自带 window 监听会在配置页误触发，R9 收口）。
 
-  const lightErrors = useMemo(() => (load ? validateMapTree(load.doc as Entity) : new Map<string, string>()), [load]);
+  const lightErrors = useMemo(() => (load ? validateMapTree(load.doc as Entity) : new Map<string, string>()), [load?.doc]);
   const invalidCanvasFields = useMemo(() => {
     if (!load) return [];
     return ["buildings", "spawns", "box_mode", "terrain_patches", "decor"].filter((key) => {
@@ -1139,8 +1202,8 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
         <button className="btn slim" data-testid="map-new-btn" onClick={createMap} disabled={busy}>
           <FilePlus2 size={14} /> 新建
         </button>
-        <button className="btn slim" data-testid="map-import-btn" onClick={() => void importMap()} disabled={busy}><FolderInput size={14} /> 导入地图</button>
-        <button className="btn slim" data-testid="map-reload-btn" title="刷新地图列表、图片和外部修改状态" onClick={() => void refreshWorkspace()} disabled={busy}>
+        <button className="btn slim" data-testid="map-import-btn" onClick={() => void importMap()} disabled={busy || saving}><FolderInput size={14} /> 导入地图</button>
+        <button className="btn slim" data-testid="map-reload-btn" title="刷新地图列表、图片和外部修改状态" onClick={() => void refreshWorkspace()} disabled={busy || saving}>
           <RotateCcw size={14} /> 刷新
         </button>
         <button
@@ -1165,7 +1228,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
           className="btn slim"
           data-testid="map-reload-doc-btn"
           onClick={() => void reloadActive()}
-          disabled={busy || !load}
+          disabled={busy || saving || !load}
           title="丢弃未保存修改，从磁盘重读当前地图"
         >
           <RotateCcw size={14} /> 重载
@@ -1252,13 +1315,13 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
           className="btn primary"
           data-testid="map-save-btn"
           onClick={save}
-          disabled={busy || !load || !dirty}
+          disabled={busy || !load || (!dirty && !saving)}
         >
           <Save size={14} /> 保存
         </button>
       </div>
 
-      {saveState.tone === "saving" ? <div className="banner info">Godot 地图门禁校验中…</div> : null}
+      {saving ? <div className="banner info" data-testid="map-saving" role="status">正在后台校验并保存，可继续编辑；再次保存将提交最新版本。</div> : null}
       {externalChanges.length > 0 ? <div className="banner warn" data-testid="map-external-changes">磁盘地图已变化：{externalChanges.join("、")}。当前编辑副本已保留，保存时会核对文件版本。</div> : null}
       {invalidCanvasFields.length > 0 ? <div className="banner error" data-testid="map-structure-errors">{invalidCanvasFields.join("、")}：须为对象数组。画布编辑已暂停，原始字段保留在 JSON 编辑器中。</div> : null}
       {saveState.tone === "ok" ? (
@@ -1319,9 +1382,10 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
           <MapCanvas
             doc={(load?.doc as Entity) ?? null}
             tool={toolState}
+            visibility={visibility}
             backgroundUrl={previewImage?.dataUrl}
             projection={backgroundView}
-            readOnly={backgroundView === "tilt" || busy || invalidCanvasFields.length > 0}
+            readOnly={!active || backgroundView === "tilt" || busy || invalidCanvasFields.length > 0}
             onTerrainRect={onTerrainRect}
             onBoxAdd={onBoxAdd}
             onPlaceAt={onPlaceAt}
@@ -1331,6 +1395,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
             selected={selectedObject}
             selectedObjects={selectedObjects}
             buildingAbbreviations={buildingAbbreviations}
+            hoverSources={hoverSources}
             onSelectObject={onSelectObject}
             onSelectObjects={onSelectObjects}
             onChangeObjectTeam={onChangeObjectTeam}
@@ -1339,6 +1404,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
             onMoveObjects={onMoveObjects}
             overlayBar={
               <>
+                <MapVisibilityPanel value={visibility} onChange={setVisibility} active={active && !jsonOpen} />
                 <button
                   className="quick-sq"
                   data-testid="map-border-btn"
@@ -1352,7 +1418,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
                   className="quick-sq"
                   data-testid="map-revert-btn"
                   onClick={() => void reloadActive()}
-                  disabled={busy || !load || load.isNew}
+                  disabled={busy || saving || !load || load.isNew}
                   title="一键取消编辑：丢弃当前地图全部未保存修改，回到上次保存（脏则确认）"
                 >
                   <RotateCcw size={17} />
@@ -1392,7 +1458,9 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
                     labels={labelsData}
                     lightErrors={lightErrors}
                     unitSuggestions={lineUnitSuggestions}
+                    featureSchema={featureSchema}
                     onChange={updateDoc}
+                    onRemoveField={(next) => applyDoc(next, "delete-field")}
                   />
                 ) : (
                   <div className="empty">选择左侧地图，或「＋ 新建地图」。</div>
@@ -1453,7 +1521,7 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
                   血量 hp（新建默认取配置表）
                 </button>
                 <button className="ctx-item" data-testid="ctx-field-lines" onClick={() => focusArrayField("buildings", ctxMenu.index, "lines")}>
-                  产线 lines（新建空数组→字段树「＋ 添加」逐线配置）
+                  产线 lines（首次复制当前建筑默认产线，可逐线修改）
                 </button>
                 <button className="ctx-item" data-testid="ctx-field-unlocked" onClick={() => focusArrayField("buildings", ctxMenu.index, "unlocked_lines")}>
                   解锁线数 unlocked_lines（新建默认 1）
@@ -1610,15 +1678,40 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
           ) : null}
         </section>
         <aside className="map-inspector" data-testid="map-inspector">
-          <div className="map-inspector-title">属性</div>
-          {load ? <BackgroundInspector doc={load.doc} info={backgroundInfo} view={backgroundView} busy={busy} imageMode={wholeImageMode} onMode={(imageMode) => void switchGroundMode(imageMode)} onView={setBackgroundView} onChange={updateDoc} onImport={(slot) => void importBackground(slot)} onRemove={removeBackground} /> : <div className="empty">未选择地图</div>}
-          {load && selectedObject ? (() => {
-            const key = selectedObject.kind === "building" ? "buildings" : "spawns";
-            const entries = load.doc[key];
-            const raw = Array.isArray(entries) ? entries[selectedObject.index] : null;
-            if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-            return <section className="map-inspector-section" data-testid="map-selected-inspector"><h3>{selectedObject.kind === "building" ? "选中建筑" : "选中出生点"}</h3>{Object.entries(raw).filter(([, value]) => typeof value === "number" || typeof value === "string").map(([field, value]) => <label className="map-field" key={field}><span>{field}</span><input className="cell" type={typeof value === "number" ? "number" : "text"} value={String(value)} disabled={busy || field === "key" || field === "kind"} onChange={(event) => { const next = [...entries as Entity[]]; next[selectedObject.index] = { ...raw, [field]: typeof value === "number" ? Number(event.target.value) : event.target.value }; updateDoc({ ...load.doc, [key]: next }); }} /></label>)}</section>;
-          })() : null}
+          <div className="map-inspector-tabs" role="tablist" aria-label="属性">
+            {([ ["map", "地图属性"], ["object", "Object 属性"] ] as const).map(([tab, title]) => (
+              <button key={tab} type="button" role="tab" id={`inspector-tab-${tab}`} aria-controls={`inspector-panel-${tab}`} aria-selected={inspectorTab === tab}
+                data-testid={`map-inspector-tab-${tab}`} className={inspectorTab === tab ? "active" : ""} onClick={() => setInspectorTab(tab)}>{title}</button>
+            ))}
+          </div>
+          <div role="tabpanel" id={`inspector-panel-${inspectorTab}`} aria-labelledby={`inspector-tab-${inspectorTab}`}>
+            {inspectorTab === "map" ? (load ? <BackgroundInspector doc={load.doc} info={backgroundInfo} view={backgroundView} busy={busy} importingDisabled={saving} imageMode={wholeImageMode} onMode={(imageMode) => void switchGroundMode(imageMode)} onView={setBackgroundView} onChange={updateDoc} onImport={(slot) => void importBackground(slot)} onRemove={removeBackground} /> : <div className="empty">未选择地图</div>) : (() => {
+              const key = selectedObject?.kind === "building" ? "buildings" : "spawns";
+              const entries = load?.doc[key];
+              const index = selectedObject?.index ?? -1;
+              const raw = Array.isArray(entries) ? entries[index] : null;
+              const originals = load?.original[key];
+              const originalRow = Array.isArray(originals) ? originals[index] : null;
+              const entity = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+              const unit = selectedObject?.kind === "spawn" ? unitsCache?.find((entry) => entry.id === entity?.kind) : null;
+              const def = selectedObject?.kind === "building" ? buildingDefs.find((entry) => entry.key === entity?.key) : null;
+              const label = entity ? `${String(entity.key ?? unit?.key ?? entity.kind ?? "Object")} · ${String(def?.name_cn ?? unit?.name_cn ?? (selectedObject?.kind === "building" ? "建筑 / 炮台" : "单位"))}` : undefined;
+              return active ? <MapObjectInspector entity={entity} original={originalRow && typeof originalRow === "object" && !Array.isArray(originalRow) ? originalRow : undefined}
+                labels={labelsData} lightErrors={lightErrors} unitSuggestions={lineUnitSuggestions} featureSchema={featureSchema}
+                path={selectedObject ? [key, index] : []} selectionLabel={label} readOnly={busy || backgroundView === "tilt"}
+                focusPath={objectFocus.path} focusRequestId={objectFocus.id}
+                onChange={(next) => {
+                  if (!load || !selectedObject || !Array.isArray(entries)) return;
+                  const updated = [...entries]; updated[index] = next;
+                  updateDoc({ ...load.doc, [key]: updated });
+                }}
+                onRemoveField={(next) => {
+                  if (!load || !selectedObject || !Array.isArray(entries)) return;
+                  const updated = [...entries]; updated[index] = next;
+                  applyDoc({ ...load.doc, [key]: updated }, "delete-field");
+                }} /> : null;
+            })()}
+          </div>
         </aside>
       </div>
     </div>

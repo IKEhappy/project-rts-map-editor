@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Trash2 } from "lucide-react";
 import type { JsonValue } from "../types";
 import type { LabelsData } from "../labels";
 import { RuleLabelView } from "./LabelBits";
@@ -9,6 +10,7 @@ interface Props {
   labels: LabelsData;
   lightErrors: Map<string, string>;
   onValueChange(key: string, value: JsonValue): void;
+  onRemove(key: string): void;
 }
 
 function RuleNumberCell(props: { value: number; testId: string; onCommit(next: number): void }) {
@@ -57,26 +59,29 @@ export default function RulesTable(props: Props) {
                   <RuleLabelView ruleKey={key} labels={props.labels} />
                 </td>
                 <td>
-                  {typeof value === "boolean" ? (
-                    <input
-                      className="cell chk"
-                      data-testid={`rule-input-${key}`}
-                      type="checkbox"
-                      checked={value}
-                      onChange={(e) => props.onValueChange(key, e.target.checked)}
-                    />
-                  ) : typeof value === "number" ? (
-                    <span className={error ? "rule-error" : undefined} title={error ?? undefined}>
-                      <RuleNumberCell
-                        value={value}
-                        testId={`rule-input-${key}`}
-                        onCommit={(next) => props.onValueChange(key, next)}
+                  <div className="rule-value-content">
+                    {typeof value === "boolean" ? (
+                      <input
+                        className="cell chk"
+                        data-testid={`rule-input-${key}`}
+                        type="checkbox"
+                        checked={value}
+                        onChange={(e) => props.onValueChange(key, e.target.checked)}
                       />
-                    </span>
-                  ) : (
-                    <span className="readonly">{JSON.stringify(value)}（R1 只读）</span>
-                  )}
-                  {error ? <span className="rule-error-text">{error}</span> : null}
+                    ) : typeof value === "number" ? (
+                      <span className={error ? "rule-error" : undefined} title={error ?? undefined}>
+                        <RuleNumberCell
+                          value={value}
+                          testId={`rule-input-${key}`}
+                          onCommit={(next) => props.onValueChange(key, next)}
+                        />
+                      </span>
+                    ) : (
+                      <span className="readonly">{JSON.stringify(value)}（R1 只读）</span>
+                    )}
+                    {error ? <span className="rule-error-text">{error}</span> : null}
+                    <button className="mini danger rule-remove" type="button" data-testid={`rule-remove-${key}`} aria-label={`删除规则 ${key}`} title={`删除规则 ${key}（可撤销；必填规则需补齐后才能保存）`} onClick={() => props.onRemove(key)}><Trash2 size={13} aria-hidden="true" /></button>
+                  </div>
                 </td>
               </tr>
             );

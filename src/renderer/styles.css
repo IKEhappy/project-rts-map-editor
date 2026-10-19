@@ -355,7 +355,9 @@ input[type="search"]::-webkit-search-cancel-button {
   padding: 0 14px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
-  -webkit-app-region: drag;
+  /* 仅 topbar 承担原生窗口拖动。此行位于主题弹层下方，drag 矩形会吞掉
+     夜间选项；即使菜单关闭后只残留第二次点击，也会误触窗口最大化。 */
+  -webkit-app-region: no-drag;
 }
 
 .workspace-bar .tab {

@@ -115,20 +115,62 @@ function imageResourceFile(workspaces, id, resource) {
   return resourceFile(workspaces, id, resource, extension);
 }
 
+// Hover metadata is a projection of the render schema, never a generic JSON
+// read API. In particular, do not return notes, unrelated objects or texture
+// bytes from the resource selected by the map's renderer reference.
+function renderConfigSummary(config) {
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const resource = (value) => {
+    if (typeof value !== 'string' || !/^res:\/\/(data|assets)\//.test(value)) return false;
+    const relative = value.slice(6).replace(/\/$/, '');
+    return !/[\\\x00-\x1f:]/.test(relative) && !relative.split('/').some((part) => !part || part === '.' || part === '..');
+  };
+  const result = {};
+  if (object(config.materials)) {
+    result.materials = Object.fromEntries(Object.entries(config.materials).filter(([, value]) => object(value)).map(([key, value]) => {
+      const material = {};
+      if (Array.isArray(value.textures)) material.textures = value.textures.filter(resource);
+      for (const field of ['cliff', 'water']) if (resource(value[field])) material[field] = value[field];
+      if (object(value.transition)) material.transition = Object.fromEntries(Object.entries(value.transition).filter(([, ref]) => resource(ref)));
+      return [key, material];
+    }));
+  }
+  if (object(config.scatter)) {
+    result.scatter = Object.fromEntries(Object.entries(config.scatter).filter(([, value]) => object(value)).map(([key, value]) => {
+      const scatter = {};
+      if (typeof value.kind === 'string') scatter.kind = value.kind;
+      if (Array.isArray(value.materials_on)) scatter.materials_on = value.materials_on.filter((entry) => typeof entry === 'string');
+      for (const field of ['density', 'hash_salt', 'variants']) if (typeof value[field] === 'number' && Number.isFinite(value[field])) scatter[field] = value[field];
+      if (typeof value.hide_when_snow === 'boolean') scatter.hide_when_snow = value.hide_when_snow;
+      return [key, scatter];
+    }));
+  }
+  // Other weather names are reserved by the game and have no visual effect.
+  if (object(config.weather)) result.weather = ['rain', 'snow'].filter((kind) => object(config.weather[kind]));
+  return result;
+}
+
 function backgroundInfo(workspaces, id, doc, nativeImage, preview = true) {
   workspaces.current(id);
   const result = { ok: true, source: 'none', background: {}, images: {}, errors: [] };
+  let renderer;
+  // The game treats an absent renderer as a legal empty configuration; it
+  // does not implicitly load data/render/default.json.
+  if (doc.renderer) {
+    try {
+      renderer = readJson(resourceFile(workspaces, id, doc.renderer, '.json'));
+      result.renderConfig = renderConfigSummary(renderer);
+    } catch (error) { result.errors.push(`renderer：${error.message}`); }
+  }
   let source = doc.background;
   if (source != null && (typeof source !== 'object' || Array.isArray(source))) {
     result.errors.push('background 必须为对象');
     result.source = 'map';
   } else if (source && Object.keys(source).length) result.source = 'map';
-  else if (doc.renderer) {
-    try {
-      source = readJson(resourceFile(workspaces, id, doc.renderer, '.json')).background;
-      if (source && typeof source === 'object' && !Array.isArray(source) && Object.keys(source).length === 0) source = null;
-      if (source != null) result.source = 'renderer';
-    } catch (error) { result.errors.push(`renderer：${error.message}`); }
+  else if (renderer) {
+    source = renderer.background;
+    if (source && typeof source === 'object' && !Array.isArray(source) && Object.keys(source).length === 0) source = null;
+    if (source != null) result.source = 'renderer';
   }
   if (source != null) {
     if (typeof source !== 'object' || Array.isArray(source)) result.errors.push('整图配置必须为对象');

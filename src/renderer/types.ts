@@ -90,10 +90,29 @@ export interface WorkspaceResult { ok: boolean; workspace?: WorkspaceSession; er
 export interface CompareEntry { path: string; status: "added" | "removed" | "changed" | "unchanged"; kind: string }
 export interface CompareResult { ok: boolean; entries?: CompareEntry[]; counts?: Record<string, number>; error?: string }
 export interface BackgroundImageInfo { path: string; width?: number; height?: number; dataUrl?: string; error?: string }
+/** Safe schema fields used to describe the map cell under the pointer. */
+export interface RenderConfigSummary {
+  weather?: string[];
+  materials?: Record<string, {
+    textures?: string[];
+    cliff?: string;
+    water?: string;
+    transition?: Record<string, string>;
+  }>;
+  scatter?: Record<string, {
+    kind?: string;
+    density?: number;
+    materials_on?: string[];
+    hash_salt?: number;
+    variants?: number;
+    hide_when_snow?: boolean;
+  }>;
+}
 export interface BackgroundInfo {
   ok: boolean;
   source: "map" | "renderer" | "none";
   background: Partial<Record<"tilt" | "topdown" | "image", string>>;
   images: Partial<Record<"tilt" | "topdown" | "image", BackgroundImageInfo>>;
+  renderConfig?: RenderConfigSummary;
   errors: string[];
 }

@@ -71,6 +71,8 @@ for (const directory of ["src/main", "src/preload", "dist", "gate"]) fs.cpSync(p
 fs.copyFileSync(path.join(root, "labels.json"), path.join(appDir, "labels.json"));
 fs.copyFileSync(path.join(root, "entity-templates.json"), path.join(appDir, "entity-templates.json"));
 copyRuntimePackage("adm-zip", path.join(appDir, "node_modules"));
+copyRuntimePackage("pngjs", path.join(appDir, "node_modules"));
+copyRuntimePackage("jpeg-js", path.join(appDir, "node_modules"));
 
 console.log("[pack] 5/7 copy Godot validation project and image resources");
 const lite = path.join(resources, "project-rts");

@@ -1,0 +1,74 @@
+/* Scope the shared JSON Tree to a compact property grid. Complex nodes expand
+   across both columns so nested production lines never inherit a tiny value
+   column from every ancestor. */
+.map-object-inspector {
+  --object-name-column: 43%;
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.map-object-summary { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-3); overflow-wrap: anywhere; }
+.map-object-summary > strong { font-size: 12px; font-weight: 600; }
+.map-object-source { color: var(--text-dim); line-height: 1.6; }
+.map-object-errors { padding: var(--sp-2) var(--sp-3); color: var(--err); background: var(--err-bg); line-height: 1.6; overflow-wrap: anywhere; }
+.map-object-table-head { display: grid; grid-template-columns: var(--object-name-column) minmax(0, 1fr); background: var(--bg-sunken); border-block: 1px solid var(--border-strong); font-weight: 600; }
+.map-object-table-head > span { padding: 5px var(--sp-2); }
+.map-object-table-head > span + span { border-left: 1px solid var(--border-strong); }
+.map-object-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+.map-object-fields:disabled { opacity: .65; }
+
+.map-object-inspector .field-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--object-name-column) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  min-height: 34px;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.map-object-inspector .field-row:last-child { border-bottom: 1px solid var(--border); }
+.map-object-inspector .field-row > .drag-grip { position: absolute; top: 7px; left: 0; width: 10px; }
+.map-object-inspector .field-row > .field-label { grid-column: 1; width: auto; min-width: 0; padding: 6px var(--sp-1) 6px var(--sp-2); border-right: 1px solid var(--border); line-height: 1.5; }
+.map-object-inspector .field-row:has(> .drag-grip) > .field-label { padding-left: var(--sp-3); }
+.map-object-inspector .field-label > .field-remove { flex-basis: 20px; min-width: 20px; width: 20px; height: 22px; min-height: 22px; }
+.map-object-inspector .label-view { gap: 0 var(--sp-1); line-height: 1.5; }
+.map-object-inspector .md-code { padding: 0; background: transparent; border: 0; border-radius: 0; white-space: normal; overflow-wrap: anywhere; color: var(--text); font-size: 11px; }
+.map-object-inspector .zh-note { font-size: 10px; overflow-wrap: anywhere; }
+.map-object-inspector .field-row > .field-editor { grid-column: 2; align-content: center; gap: var(--sp-1); padding: 3px var(--sp-1); min-width: 0; min-height: 32px; }
+.map-object-inspector .field-editor > span:has(> .num-cell) { width: 100%; min-width: 0; }
+.map-object-inspector .field-editor > .identity { overflow-wrap: anywhere; }
+.map-object-inspector .field-editor > .cell.str,
+.map-object-inspector .field-editor > .dropdown,
+.map-object-inspector .field-editor > .num-cell { width: 100%; min-width: 0; }
+.map-object-inspector .num-cell { width: 100%; min-width: 0; }
+.map-object-inspector .num-cell > .step-btn { flex: 0 0 20px; min-width: 20px; width: 20px; padding: 0; }
+.map-object-inspector .num-cell > .cell.num { min-width: 0; width: 0; flex: 1 1 0; padding-inline: 2px; }
+.map-object-inspector .cell,
+.map-object-inspector .dd-trigger,
+.map-object-inspector .mini { font-size: 11px; }
+.map-object-inspector .field-editor .dropdown > .dd-trigger { width: 100%; min-width: 0; max-width: 100%; height: auto; min-height: var(--control-h); padding: 4px 5px; }
+.map-object-inspector .dd-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+
+.map-object-inspector .field-row:has(> .field-editor > .tree-node) > .field-editor,
+.map-object-inspector .field-row > .field-editor > .tree-node { display: contents; }
+.map-object-inspector .field-row > .field-editor > .tree-node > .collapse-btn { position: absolute; top: 4px; left: calc(var(--object-name-column) + 4px); }
+.map-object-inspector .field-row > .field-editor > .tree-node > .node-title { grid-column: 2; align-self: center; padding: 6px var(--sp-1) 6px 25px; line-height: 1.5; font-size: 11px; }
+.map-object-inspector .field-row > .field-editor > .tree-node > .tree-children { grid-column: 1 / -1; min-width: 0; width: auto; margin: 0 0 0 var(--sp-2); padding: var(--sp-1) 0 0 var(--sp-1); border-left: 1px solid var(--border-strong); gap: var(--sp-1); }
+.map-object-inspector .field-row:has(> .field-editor > .tree-box) > .field-editor { grid-column: 1 / -1; padding: 0 0 0 var(--sp-2); border-top: 1px solid var(--border-subtle); }
+.map-object-inspector .field-editor > .tree-box { min-width: 0; padding: 0; border: 0; border-left: 1px solid var(--border-strong); border-radius: 0; background: transparent; }
+.map-object-inspector .tree-row-box { min-width: 0; padding: 0; border: 1px solid var(--border); border-radius: 0; }
+.map-object-inspector .tree-row-head { min-width: 0; padding: 2px var(--sp-1); background: var(--bg-sunken); }
+.map-object-inspector .tree-row { gap: var(--sp-1); }
+.map-object-inspector .tree-row > .dropdown,
+.map-object-inspector .tree-row > .num-cell,
+.map-object-inspector .tree-row > .cell.str { flex: 1 1 100px; width: auto; min-width: 0; }
+.map-object-inspector .row-ops { gap: 2px; }
+.map-object-inspector .row-ops .mini { width: 21px; min-width: 21px; padding-inline: 2px; }
+.map-object-inspector .add-field-row { padding: var(--sp-1); gap: var(--sp-1); }
+.map-object-inspector .add-field-row > .cell.str { flex: 1 1 90px; min-width: 0; width: 90px; }
+.map-object-inspector .add-field-row > select.cell { flex: 1 1 100px; width: 100px; min-width: 0; max-width: 100%; }
+.map-object-empty { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-4) var(--sp-3); color: var(--text-dim); line-height: 1.7; }
+.map-object-empty > strong { color: var(--text); font-size: 12px; font-weight: 500; }
