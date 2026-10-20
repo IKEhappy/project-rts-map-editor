@@ -313,8 +313,78 @@ function collisionErrors(buildings: BuildingGeometry[], spawns: SpawnGeometry[])
   return errors;
 }
 
-export function validateMapTree(doc: Entity): Map<string, string> {
+/**
+ * Validate the semantic contract for a map-level building `lines` override.
+ * The game accepts either a unit production row or a functional row carrying
+ * at least one positive effect.  Keeping this check in the map feedback layer
+ * prevents an empty line (the old "unit: \"\"" insertion default) from
+ * reaching the Godot gate and gives the editor a precise field path.
+ *
+ * `knownUnitKeys` is optional because the map panel can be opened before the
+ * units table has finished loading.  Shape/effect validation remains useful in
+ * that state; when the set is available we also mirror SimCore's unknown-unit
+ * rejection.
+ */
+export function validateMapLines(
+  doc: Entity,
+  knownUnitKeys: Set<string> | null = null,
+): Map<string, string> {
   const errors = new Map<string, string>();
+  if (!Array.isArray(doc.buildings)) return errors;
+  doc.buildings.forEach((rawBuilding, buildingIndex) => {
+    if (rawBuilding === null || typeof rawBuilding !== "object" || Array.isArray(rawBuilding)) return;
+    const building = rawBuilding as Entity;
+    if (!Object.hasOwn(building, "lines")) return;
+    const lines = building.lines;
+    const base = `buildings-${buildingIndex}-lines`;
+    if (!Array.isArray(lines)) {
+      errors.set(base, "lines：地图覆盖须为数组");
+      return;
+    }
+    lines.forEach((rawLine, lineIndex) => {
+      const path = `${base}-${lineIndex}`;
+      if (rawLine === null || typeof rawLine !== "object" || Array.isArray(rawLine)) {
+        errors.set(path, "产线行：须为对象");
+        return;
+      }
+      const line = rawLine as Entity;
+      const unit = line.unit;
+      const hasUnit = typeof unit === "string" && unit.trim().length > 0;
+      if (unit !== undefined && typeof unit !== "string") {
+        errors.set(`${path}-unit`, "unit：须为单位 key 字符串");
+      } else if (hasUnit && knownUnitKeys && !knownUnitKeys.has(unit as string)) {
+        errors.set(`${path}-unit`, `未定义单位键：${unit}`);
+      }
+      // SimCore only reads tier for unit rows; functional resource rows are
+      // identified by their effect and deliberately do not require a tier.
+      if (hasUnit && line.tier !== undefined && (typeof line.tier !== "number" || !Number.isInteger(line.tier) || line.tier < 1 || line.tier > 3)) {
+        errors.set(`${path}-tier`, "tier：须为 1..3 的整数");
+      }
+      for (const ticksKey of ["ticks", "produce_ticks"]) {
+        const ticks = line[ticksKey];
+        if (ticks !== undefined && (typeof ticks !== "number" || !Number.isFinite(ticks) || !Number.isInteger(ticks) || ticks < 1)) {
+          errors.set(`${path}-${ticksKey}`, `${ticksKey}：须为 ≥1 的整数`);
+        }
+      }
+      let hasEffect = false;
+      for (const effect of ["income", "research", "speed_up"]) {
+        const value = line[effect];
+        if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 1)) {
+          errors.set(`${path}-${effect}`, `${effect}：须为 ≥1 的数值`);
+        }
+        if (typeof value === "number" && Number.isFinite(value) && value >= 1) hasEffect = true;
+      }
+      if (!hasUnit && !hasEffect) {
+        errors.set(path, "产线行：须包含有效 unit，或至少一个 ≥1 的 income/research/speed_up");
+      }
+    });
+  });
+  return errors;
+}
+
+export function validateMapTree(doc: Entity, knownUnitKeys: Set<string> | null = null): Map<string, string> {
+  const errors = new Map<string, string>();
+  for (const [path, message] of validateMapLines(doc, knownUnitKeys)) errors.set(path, message);
   if (doc.background !== undefined && doc.background !== null) {
     const background = doc.background;
     if (typeof background !== "object" || Array.isArray(background)) {

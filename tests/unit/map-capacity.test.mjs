@@ -39,6 +39,39 @@ test('unit spawns do not consume building capacity', () => {
   assert.equal(withSpawn.spawns.length, 129);
 });
 
+test('map building line overrides accept radar units and functional resource lines', () => {
+  const units = new Set(['tactical_fire', 'tactical_bomber']);
+  const doc = {
+    width: 16, height: 16,
+    buildings: [
+      { key: 'radar', x: 0, y: 0, w: 2, h: 2, lines: [{ unit: 'tactical_fire', tier: 1, produce_ticks: 300 }] },
+      { key: 'mine', x: 4, y: 0, w: 2, h: 2, lines: [{ income: 1 }, { income: 2 }, { income: 3 }] },
+    ],
+  };
+  assert.equal(validateMapTree(doc, units).size, 0);
+});
+
+test('map line feedback rejects an empty unit row before the Godot gate', () => {
+  const errors = validateMapTree({
+    width: 8, height: 8,
+    buildings: [{ key: 'mine', x: 0, y: 0, w: 2, h: 2, lines: [{ unit: '', tier: 2, ticks: 60 }] }],
+  }, new Set(['tactical_fire']));
+  assert.match(errors.get('buildings-0-lines-0'), /有效 unit|income/);
+});
+
+test('map line feedback rejects unknown units and accepts blank unit with an effect', () => {
+  const unknown = validateMapTree({
+    width: 8, height: 8,
+    buildings: [{ key: 'radar', x: 0, y: 0, w: 2, h: 2, lines: [{ unit: 'future_unit', ticks: 60 }] }],
+  }, new Set(['tactical_fire']));
+  assert.match(unknown.get('buildings-0-lines-0-unit'), /未定义/);
+  const effect = validateMapTree({
+    width: 8, height: 8,
+    buildings: [{ key: 'mine', x: 0, y: 0, w: 2, h: 2, lines: [{ unit: '', income: 1 }] }],
+  }, new Set());
+  assert.equal(effect.size, 0);
+});
+
 test('canvas placement reaches 1024 and never creates the 1025th building or turret', () => {
   const before = map(1023);
   const full = addBuilding(before, 80, 80, { key: 'turret_guard', w: 1, h: 1 }, 1);

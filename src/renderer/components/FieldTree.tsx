@@ -10,6 +10,7 @@ import { defaultsAtPath, type FeatureSchema } from "../schema-templates";
 import { removeAtPath, setAtPath } from "../field-path";
 import { equalFieldValue } from "../field-value-equality";
 import { currentNumberDraft, parseNumberText, type NumberDraft } from "../number-input-state";
+import { productionLineForAppend } from "../line-defaults";
 import "../styles-tree.css";
 
 type Path = Array<string | number>;
@@ -312,7 +313,13 @@ function FieldTree(props: Props) {
     const options = enumOptions(labels, field);
     const defaults = featureSchema ? defaultsAtPath(featureSchema, arrayPath.slice(0, -1))[field] : undefined;
     let element: JsonValue;
-    if (last !== undefined) {
+    if (field === "lines") {
+      // Never append the old empty-unit placeholder.  For a map placement,
+      // `defaults` is resolved from that building's definition, so functional
+      // lines (mine/research/energy) and radar unit lines both keep their
+      // correct shape.  Existing invalid rows remain editable and visible.
+      element = productionLineForAppend(arr, defaults, unitSuggestions);
+    } else if (last !== undefined) {
       element = deepClone(last);
     } else if (arrayTypes[pathKey(arrayPath)]) {
       const type = arrayTypes[pathKey(arrayPath)];
@@ -323,8 +330,6 @@ function FieldTree(props: Props) {
       element = deepClone(ARRAY_DEFAULTS[field]);
     } else if (options && options.length > 0) {
       element = options[0][0];
-    } else if (field === "lines") {
-      element = { unit: "", tier: 1, ticks: 60 };
     } else {
       element = {};
     }

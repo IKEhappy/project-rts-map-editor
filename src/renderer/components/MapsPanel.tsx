@@ -1174,7 +1174,14 @@ export default function MapsPanel({ workspace, labelsData, handleRef, onDirtyCha
   // Ctrl+S/Ctrl+Z/Ctrl+Y 由 App 全局监听统一路由到本面板句柄（隐藏时不响应——
   // 面板常驻挂载，自带 window 监听会在配置页误触发，R9 收口）。
 
-  const lightErrors = useMemo(() => (load ? validateMapTree(load.doc as Entity) : new Map<string, string>()), [load?.doc]);
+  const knownMapUnitKeys = useMemo(
+    () => unitsCache ? new Set(unitsCache.map((unit) => String(unit.key ?? "")).filter(Boolean)) : null,
+    [unitsCache],
+  );
+  const lightErrors = useMemo(
+    () => (load ? validateMapTree(load.doc as Entity, knownMapUnitKeys) : new Map<string, string>()),
+    [load?.doc, knownMapUnitKeys],
+  );
   const invalidCanvasFields = useMemo(() => {
     if (!load) return [];
     return ["buildings", "spawns", "box_mode", "terrain_patches", "decor"].filter((key) => {

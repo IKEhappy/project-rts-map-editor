@@ -58,6 +58,13 @@ func _run(args: PackedStringArray) -> Dictionary:
 	var asset_errors: Array = _validate_background(data)
 	if not asset_errors.is_empty():
 		return _rejected(asset_errors)
+	# Map line overrides are parsed by SimCore after the candidate is written.
+	# Validate them before build_level so malformed rows return a normal gate
+	# rejection with a field path instead of an engine ERROR on stderr (which the
+	# Electron host can only report as a generic "Godot 校验失败").
+	var line_errors: Array = _validate_line_overrides(data)
+	if not line_errors.is_empty():
+		return _rejected(line_errors)
 
 	# 结构可解析性预检（防加载器 assert 中止致无协议输出）：数值尺寸缺失/非正不是语义
 	# 裁定，是 GameMap.from_dict 的既定硬约束，此处仅翻译成可读拒绝理由。
@@ -184,6 +191,49 @@ func _validate_background(data: Dictionary) -> Array:
 		var texture: Texture2D = load(resource) as Texture2D
 		if texture == null:
 			errors.append("background.%s cannot be loaded by Godot: %s" % [view, resource])
+	return errors
+
+
+func _validate_line_overrides(data: Dictionary) -> Array:
+	var errors: Array = []
+	var raw_buildings: Variant = data.get("buildings", [])
+	if not raw_buildings is Array:
+		return errors
+	var unit_script: GDScript = load("res://src/data/defs.gd")
+	var unit_defs: Dictionary = unit_script.load_all() if unit_script != null else {}
+	var known_units: Dictionary = unit_defs.get("by_key", {}) if unit_defs is Dictionary else {}
+	for bi: int in (raw_buildings as Array).size():
+		var raw_building: Variant = (raw_buildings as Array)[bi]
+		if not raw_building is Dictionary:
+			continue
+		var building: Dictionary = raw_building
+		if not building.has("lines"):
+			continue
+		var raw_lines: Variant = building.get("lines")
+		if not raw_lines is Array:
+			errors.append("building[%d] lines 必须为数组" % bi)
+			continue
+		for li: int in (raw_lines as Array).size():
+			var raw_line: Variant = (raw_lines as Array)[li]
+			if not raw_line is Dictionary:
+				errors.append("building[%d] lines[%d] 必须为对象" % [bi, li])
+				continue
+			var line: Dictionary = raw_line
+			var unit: String = String(line.get("unit", ""))
+			if not unit.is_empty():
+				if not known_units.has(unit):
+					errors.append("building[%d] lines[%d] unit 未定义：%s" % [bi, li, unit])
+				var tier: int = int(line.get("tier", 1))
+				if tier < 1 or tier > 3:
+					errors.append("building[%d] lines[%d] tier 必须为 1..3" % [bi, li])
+			else:
+				var has_effect: bool = false
+				for effect: String in ["income", "research", "speed_up"]:
+					var value: Variant = line.get(effect, 0)
+					if (value is int or value is float) and int(value) >= 1:
+						has_effect = true
+				if not has_effect:
+					errors.append("building[%d] lines[%d] 无 unit 且无 ≥1 的 income/research/speed_up" % [bi, li])
 	return errors
 
 

@@ -8,6 +8,7 @@ import { MAX_MAP_BUILDINGS } from '../../src/renderer/map-limits.ts';
 
 const require = createRequire(import.meta.url);
 const store = require('../../src/main/store.cjs');
+const { spawnSync } = require('node:child_process');
 const { WorkspaceService } = require('../../src/main/workspace.cjs');
 const configured = store.env();
 const currentProject = path.resolve(import.meta.dirname, '../../../project-rts');
@@ -63,4 +64,32 @@ test('real map save gate supports 1024 buildings and rejects 1025 before silent 
   assert.deepEqual(fs.readFileSync(file), acceptedBytes);
   assert.equal(fs.readFileSync(`${file}.bak`, 'utf8'), initial);
   assert.deepEqual(fs.readdirSync(maps).filter((name) => !name.startsWith('.')), ['capacity.json', 'capacity.json.bak']);
+});
+
+test('real map gate accepts radar unit lines and rejects an empty line with a field path', { skip: !available, timeout: 120000 }, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'map-lines-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const valid = {
+    version: 1, name: 'radar-lines', width: 16, height: 16, seed: 1,
+    default_terrain: 0, terrain_patches: [], box_mode: [], decor: [], spawns: [], init: {},
+    buildings: [{ key: 'radar', x: 0, y: 0, w: 2, h: 2, team: 1,
+      lines: [{ unit: 'tactical_fire', tier: 1, produce_ticks: 300 }] }],
+  };
+  const candidate = path.join(root, 'candidate.json');
+  const writeAndRun = (doc) => {
+    fs.writeFileSync(candidate, JSON.stringify(doc));
+    return spawnSync(configured.godotExe, [
+      '--headless', '--path', currentProject, '--script', path.join(path.resolve(import.meta.dirname, '../..'), 'gate/map_gate.gd'),
+      '--', 'check', '--candidate', candidate,
+    ], { encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
+  };
+  const accepted = writeAndRun(valid);
+  assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
+  assert.match(accepted.stdout, /GATE_RESULT .*"ok":true/);
+  const invalid = structuredClone(valid);
+  invalid.buildings[0].lines = [{ unit: '', tier: 2, ticks: 60 }];
+  const rejected = writeAndRun(invalid);
+  assert.equal(rejected.status, 2, `${rejected.stdout}\n${rejected.stderr}`);
+  assert.match(rejected.stdout, /GATE_RESULT .*"ok":false/);
+  assert.match(rejected.stdout, /building\[0\] lines\[0\].*无 unit/);
 });
